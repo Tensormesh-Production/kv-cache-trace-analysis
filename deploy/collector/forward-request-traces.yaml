@@ -1,0 +1,25 @@
+# Add to an existing OpenTelemetry Collector's configuration, for example as a
+# second --config file. Forwards only LMCache's mp.request.trace spans to the
+# trace collector. Uses the existing collector's OTLP receiver, named otlp.
+# Collector 0.159.0 and later also name the otlp exporter otlp_grpc.
+processors:
+  filter/request-trace-only:
+    error_mode: ignore
+    traces:
+      span:
+        - 'name != "mp.request.trace"'
+  batch/request-trace:
+    send_batch_size: 64
+    send_batch_max_size: 64
+    timeout: 1s
+exporters:
+  otlp/request-trace:
+    endpoint: trace-collector.trace-analysis.svc:4317
+    tls:
+      insecure: true
+service:
+  pipelines:
+    traces/request-trace:
+      receivers: [otlp]
+      processors: [filter/request-trace-only, batch/request-trace]
+      exporters: [otlp/request-trace]

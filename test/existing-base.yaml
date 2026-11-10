@@ -1,0 +1,16 @@
+# Test only: configuration of an "existing" OpenTelemetry Collector, before
+# deploy/collector/forward-request-traces.yaml is added.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  debug: {}
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]

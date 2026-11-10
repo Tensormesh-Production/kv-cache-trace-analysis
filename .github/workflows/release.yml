@@ -1,0 +1,30 @@
+name: release
+
+# A tag vX.Y.Z publishes the manifests and the format template as release assets.
+# Tags with a suffix (vX.Y.Z-rc.N) are pre-releases.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$TAG" --title "$TAG" --generate-notes $prerelease \
+            deploy/collector/trace-collector.yaml \
+            deploy/analyzer/analyzer-dynamo.yaml \
+            deploy/analyzer/analyzer-lmcache.yaml \
+            deploy/analyzer/analyzer-custom.yaml \
+            tools/custom_format.py

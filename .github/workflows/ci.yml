@@ -1,0 +1,184 @@
+name: ci
+
+# Pull requests: lint, build and test the image (amd64, arm64) and run the
+# end-to-end test on kind, with the newest LMCache release.
+# Pushes to main that change the image or tests, and manual runs: the same, then
+# publish the tested image as <lmcache-version> and latest.
+# Daily: when the newest LMCache release has no image yet, build, test and
+# publish it the same way. A failed test publishes nothing.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths: ["image/**", "test/**", ".github/workflows/ci.yml"]
+  workflow_dispatch:
+    inputs:
+      lmcache_version:
+        description: LMCache version (default the newest release on PyPI)
+        required: false
+  schedule:
+    - cron: "17 7 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      lmcache: ${{ steps.v.outputs.lmcache }}
+      latest: ${{ steps.v.outputs.latest }}
+      build: ${{ steps.v.outputs.build }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          INPUT: ${{ inputs.lmcache_version }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          newest=$(curl -fsSL https://pypi.org/pypi/lmcache/json | python3 -c 'import json, re, sys; r = json.load(sys.stdin)["releases"]; s = [v for v, f in r.items() if re.fullmatch(r"\d+(\.\d+)*", v) and f and not all(x.get("yanked") for x in f)]; print(max(s, key=lambda v: tuple(map(int, v.split(".")))))')
+          version=${INPUT:-$newest}
+          latest=false
+          if [ "$version" = "$newest" ]; then latest=true; fi
+          build=true
+          publish=false
+          if [ "$EVENT" != pull_request ] && [ "$REF" = refs/heads/main ]; then publish=true; fi
+          if [ "$EVENT" = schedule ]; then
+            echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+            if docker buildx imagetools inspect "$IMAGE:$version" > /dev/null 2>&1; then
+              build=false
+              publish=false
+            fi
+          fi
+          echo "LMCache $version (newest $newest): build $build, publish $publish"
+          {
+            echo "lmcache=$version"
+            echo "latest=$latest"
+            echo "build=$build"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  lint:
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Kubernetes manifests
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
+          ./kubeconform -strict -summary deploy/collector/trace-collector.yaml deploy/analyzer/*.yaml test/loader-job.yaml test/existing-collector.yaml
+      - name: Shell scripts
+        run: shellcheck image/analyze.sh test/*.sh
+
+  image:
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        id: build
+        env:
+          PUBLISH: ${{ needs.version.outputs.publish }}
+          LMCACHE: ${{ needs.version.outputs.lmcache }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker buildx create --use
+          if [ "$PUBLISH" = true ]; then
+            echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+            output="type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true"
+          else
+            output="type=docker,name=analyzer:ci"
+          fi
+          docker buildx build --platform "linux/$ARCH" --build-arg "LMCACHE_VERSION=$LMCACHE" \
+            --output "$output" --metadata-file meta.json image
+          if [ "$PUBLISH" = true ]; then
+            digest=$(python3 -c 'import json; print(json.load(open("meta.json"))["containerimage.digest"])')
+            docker pull "$IMAGE@$digest"
+            echo "ref=$IMAGE@$digest" >> "$GITHUB_OUTPUT"
+            mkdir -p digests
+            echo "$digest" > "digests/$ARCH"
+          else
+            echo "ref=analyzer:ci" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Test
+        run: sh test/image-test.sh "${{ steps.build.outputs.ref }}"
+      - uses: actions/upload-artifact@v7
+        if: needs.version.outputs.publish == 'true'
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/${{ matrix.arch }}
+
+  e2e:
+    needs: version
+    if: needs.version.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        env:
+          LMCACHE: ${{ needs.version.outputs.lmcache }}
+        run: docker build --build-arg "LMCACHE_VERSION=$LMCACHE" -t analyzer:ci image
+      - name: Kind cluster
+        run: |
+          curl -fsSLo kind https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+          for _ in 1 2 3; do docker pull kindest/node:v1.34.0 && break; sleep 60; done
+          kind create cluster --image kindest/node:v1.34.0 --wait 120s
+          kind load docker-image analyzer:ci
+      - name: Test
+        run: sh test/e2e.sh analyzer:ci
+
+  publish:
+    needs: [version, lint, image, e2e]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: digests
+          merge-multiple: true
+      - name: Tag the tested image
+        env:
+          LMCACHE: ${{ needs.version.outputs.lmcache }}
+          LATEST: ${{ needs.version.outputs.latest }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          tags=(-t "$IMAGE:$LMCACHE")
+          if [ "$LATEST" = true ]; then tags+=(-t "$IMAGE:latest"); fi
+          docker buildx imagetools create "${tags[@]}" "$IMAGE@$(cat digests/amd64)" "$IMAGE@$(cat digests/arm64)"
+          docker buildx imagetools inspect "$IMAGE:$LMCACHE"

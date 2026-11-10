@@ -1,0 +1,14 @@
+numpy<=2.2.6
+numba
+blake3
+sortedcontainers
+msgspec
+pydantic
+cryptography
+cachetools
+opentelemetry-api>=1.45.1
+opentelemetry-sdk>=1.20.0
+prometheus_client>=0.18.0,<=0.24.1
+psutil
+pyyaml
+torch==2.13.0

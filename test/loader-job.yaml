@@ -1,0 +1,44 @@
+# Test only: sends synthetic traces of one format to a collector. test/e2e.sh
+# replaces __FORMAT__, __ENDPOINT__ and __IMAGE__ (the analyzer image has python3).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trace-loader-__FORMAT__
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loader
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          command: ["python3", "/app/loader.py", "--endpoint", "__ENDPOINT__", "--format", "__FORMAT__"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: trace-loader

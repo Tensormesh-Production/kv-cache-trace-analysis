@@ -1,0 +1,61 @@
+# Test only: an "existing" OpenTelemetry Collector that runs with
+# deploy/collector/forward-request-traces.yaml as a second config file.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: existing-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: existing-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: existing-collector
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otelcol
+          image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0
+          args: ["--config=/conf/base.yaml", "--config=/conf/forward.yaml"]
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+      volumes:
+        - name: config
+          configMap:
+            name: existing-collector
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: existing-collector
+spec:
+  selector:
+    app.kubernetes.io/name: existing-collector
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http

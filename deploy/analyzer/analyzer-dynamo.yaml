@@ -1,0 +1,68 @@
+# Analyzer Job for Dynamo request traces. Runs on the collector's node (the volume
+# is ReadWriteOnce), reads the trace files read-only, and prints the HTML report
+# to its log. The Job is deleted one hour after it ends.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trace-analyzer-dynamo
+  labels:
+    app.kubernetes.io/name: trace-analyzer
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: trace-analyzer
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: trace-collector
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: analyzer
+          image: ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer:latest
+          imagePullPolicy: Always
+          env:
+            - name: TRACE_FORMAT
+              value: dynamo
+            - name: ANALYZER_ARGS
+              value: ""
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 16Gi
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: traces
+              mountPath: /data
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: traces
+          persistentVolumeClaim:
+            claimName: trace-collector-data
+            readOnly: true
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
