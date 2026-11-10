@@ -50,21 +50,45 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ACTOR: ${{ github.actor }}
         run: |
-          newest=$(curl -fsSL https://pypi.org/pypi/lmcache/json | python3 -c 'import json, re, sys; r = json.load(sys.stdin)["releases"]; s = [v for v, f in r.items() if re.fullmatch(r"\d+(\.\d+)*", v) and f and not all(x.get("yanked") for x in f)]; print(max(s, key=lambda v: tuple(map(int, v.split(".")))))')
-          version=${INPUT:-$newest}
+          # LMCache releases on PyPI with the trace analyzer (0.5.7 or later): the newest
+          # stable release, and the newest release including release candidates. Without a
+          # stable release, the newest release candidate is tested and nothing is published.
+          releases=$(curl -fsSL https://pypi.org/pypi/lmcache/json | python3 -c '
+          import json, re, sys
+          files = json.load(sys.stdin)["releases"]
+          def key(v):
+              m = re.fullmatch(r"(\d+(?:\.\d+)*)(?:rc(\d+)|\.post(\d+))?", v)
+              if m:
+                  stage = (0, int(m[2])) if m[2] else (2, int(m[3])) if m[3] else (1, 0)
+                  return tuple(map(int, m[1].split("."))), stage
+          ok = [v for v, f in files.items() if key(v) and key(v)[0] >= (0, 5, 7) and f and not all(x.get("yanked") for x in f)]
+          stable = [v for v in ok if "rc" not in v]
+          print(max(stable, key=key, default="none"), max(ok, key=key, default="none"))
+          ')
+          read -r stable newest <<< "$releases"
+          version=${INPUT:-$stable}
+          if [ "$version" = none ]; then version=$newest; fi
+          if [ "$version" = none ]; then echo "No LMCache release with the trace analyzer on PyPI"; exit 1; fi
           latest=false
-          if [ "$version" = "$newest" ]; then latest=true; fi
+          if [ "$version" = "$stable" ]; then latest=true; fi
           build=true
           publish=false
-          if [ "$EVENT" != pull_request ] && [ "$REF" = refs/heads/main ]; then publish=true; fi
+          case "$version" in
+            *rc*) ;;
+            *) if [ "$EVENT" != pull_request ] && [ "$REF" = refs/heads/main ]; then publish=true; fi ;;
+          esac
           if [ "$EVENT" = schedule ]; then
-            echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-            if docker buildx imagetools inspect "$IMAGE:$version" > /dev/null 2>&1; then
+            if [ "$version" != "$stable" ]; then
               build=false
-              publish=false
+            else
+              echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+              if docker buildx imagetools inspect "$IMAGE:$version" > /dev/null 2>&1; then
+                build=false
+                publish=false
+              fi
             fi
           fi
-          echo "LMCache $version (newest $newest): build $build, publish $publish"
+          echo "LMCache $version (newest stable $stable, newest $newest): build $build, publish $publish"
           {
             echo "lmcache=$version"
             echo "latest=$latest"
