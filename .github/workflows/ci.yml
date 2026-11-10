@@ -1,7 +1,7 @@
 name: ci
 
-# Pull requests: lint, build and test the image (amd64, arm64) and run the
-# end-to-end test on kind, with the newest LMCache release.
+# Pull requests: lint, build and test the image (amd64, arm64), run the Docker
+# test and the end-to-end test on kind, with the newest LMCache release.
 # Pushes to main that change the image or tests, and manual runs: the same, then
 # publish the tested image as <lmcache-version> and latest.
 # Daily: when the newest LMCache release has no image yet, build, test and
@@ -130,6 +130,8 @@ jobs:
           fi
       - name: Test
         run: sh test/image-test.sh "${{ steps.build.outputs.ref }}"
+      - name: Docker test
+        run: sh test/docker-test.sh "${{ steps.build.outputs.ref }}"
       - uses: actions/upload-artifact@v7
         if: needs.version.outputs.publish == 'true'
         with:

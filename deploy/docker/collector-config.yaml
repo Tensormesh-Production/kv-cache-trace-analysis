@@ -1,0 +1,54 @@
+# Trace collector for Docker: receives OTLP on ports 4317 (gRPC) and 4318 (HTTP),
+# keeps only request records (LMCache mp.request.trace spans, Dynamo request_payload
+# logs), and writes them to /data (newest 80 files of 512 MB).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 64
+      http:
+        endpoint: 0.0.0.0:4318
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  filter/request-trace:
+    error_mode: ignore
+    traces:
+      span:
+        - 'IsMatch(instrumentation_scope.name, "^lmcache_mp[.]") and name != "mp.request.trace"'
+    logs:
+      log_record:
+        - 'instrumentation_scope.name == "dynamo.request_trace" and attributes["event_type"] != "request_payload"'
+  batch/request-trace:
+    send_batch_size: 64
+    send_batch_max_size: 64
+    timeout: 1s
+exporters:
+  file/request-trace:
+    path: /data/request-trace.jsonl
+    rotation:
+      max_megabytes: 512
+      max_backups: 80
+  prometheus/lmcache:
+    endpoint: 0.0.0.0:8889
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/request-trace, batch/request-trace]
+      exporters: [file/request-trace]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/request-trace, batch/request-trace]
+      exporters: [file/request-trace]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter]
+      exporters: [prometheus/lmcache]
