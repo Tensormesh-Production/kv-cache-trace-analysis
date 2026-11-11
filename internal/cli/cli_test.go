@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/yaml"
 )
@@ -103,6 +104,28 @@ func TestMaxSize(t *testing.T) {
 		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), c.err) {
 			t.Errorf("--max-size %s: %v", c.size, err)
 		}
+	}
+}
+
+func TestDuration(t *testing.T) {
+	for in, want := range map[string]time.Duration{"90m": 90 * time.Minute, "12h": 12 * time.Hour, "2d": 48 * time.Hour, "1s": time.Second} {
+		if got, err := parseDuration(in); err != nil || got != want {
+			t.Errorf("parseDuration(%q) = %v, %v", in, got, err)
+		}
+	}
+	for _, in := range []string{"0", "-1h", "2x", "d", "1.5d"} {
+		if _, err := parseDuration(in); err == nil {
+			t.Errorf("parseDuration(%q): want an error", in)
+		}
+	}
+	var out bytes.Buffer
+	cmd := NewRoot(&out, strings.NewReader(""))
+	cmd.SetArgs([]string{"start", "--dry-run", "-n", "test", "--duration", "2h"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "filter/deadline") || !strings.Contains(out.String(), "UnixSeconds(Now()) > ") {
+		t.Errorf("start --duration --dry-run:\n%s", out.String())
 	}
 }
 

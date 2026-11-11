@@ -31,7 +31,12 @@ It uses the current kubectl context. `--context` and `--kubeconfig` pick another
    tm-trace start
    ```
 
-2. Set them on NVIDIA Dynamo or LMCache, and let it collect traffic.
+2. Set them on NVIDIA Dynamo or LMCache, and let it collect traffic. To see how much it has collected so far:
+
+   ```bash
+   tm-trace status
+   ```
+
 3. Run the analysis. It saves one report per trace format, such as `report-lmcache.html`.
 
    ```bash
@@ -47,6 +52,7 @@ It uses the current kubectl context. `--context` and `--kubeconfig` pick another
 - With the Tensormesh Platform, `tm-trace` finds it in namespace `tensormesh-platform` (`-n` for another). `start` and `stop` print the settings and the helm command that turn its request traces on and off, and `analyze` uses its collector.
 - Without Kubernetes, add `--docker` to each command. It uses Docker or Podman on this host, and keeps the trace files in `tm-trace/traces`.
 - The trace files stay under `--max-size` (default 50 GiB). On Kubernetes, it is the volume size. With `--docker`, `start` checks that the disk has that much free space.
+- `start --duration 24h` stops collecting after that time, for example to keep to an approved collection window. The trace files stay until `stop`.
 - `tm-trace <command> --help` lists the options, such as `--model`, `--custom-format`, `--image` for mirrors, and `--dry-run` to see what would run.
 
 ## Manual steps with kubectl

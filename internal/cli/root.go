@@ -42,6 +42,7 @@ non-prefix hit rates for a range of cache sizes. The trace files stay in your
 cluster or on your host, and are deleted by tm-trace stop.
 
   tm-trace start     deploy the trace collector and print the trace source settings
+  tm-trace status    show how much the collector has collected so far
   tm-trace analyze   run the analysis and save report-<format>.html
   tm-trace stop      delete the collector and the trace files
 
@@ -59,7 +60,7 @@ Kubernetes is the default. With the Tensormesh Platform, use its namespace
 	f.StringVar(&o.dir, "dir", "tm-trace", "folder for the collector configuration and trace files, with --docker")
 	f.BoolVar(&o.dryRun, "dry-run", false, "print what would be created or run, and change nothing")
 	f.BoolVarP(&o.yes, "yes", "y", false, "do not ask for confirmation")
-	root.AddCommand(newStart(o), newAnalyze(o), newStop(o), newVersion(o))
+	root.AddCommand(newStart(o), newStatus(o), newAnalyze(o), newStop(o), newVersion(o))
 	return root
 }
 

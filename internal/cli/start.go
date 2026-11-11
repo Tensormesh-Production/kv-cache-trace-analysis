@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,8 +19,9 @@ import (
 )
 
 type startOptions struct {
-	maxSize, storageClass, image, listen string
-	nodeSelector                         map[string]string
+	maxSize, storageClass, image, listen, duration string
+	nodeSelector                                   map[string]string
+	deadline                                       time.Time
 }
 
 // traceValuesFile and traceOnValues turn on the platform's request traces,
@@ -54,6 +58,13 @@ on its request traces instead: the platform release is never changed by tm-trace
 			if _, err := manifest.Backups(size); err != nil {
 				return fmt.Errorf("--max-size: %w", err)
 			}
+			if s.duration != "" {
+				d, err := parseDuration(s.duration)
+				if err != nil {
+					return fmt.Errorf("--duration: %w", err)
+				}
+				s.deadline = time.Now().Add(d).Truncate(time.Second)
+			}
 			if o.useDocker() {
 				return startDocker(cmd.Context(), o, s, size)
 			}
@@ -66,6 +77,7 @@ on its request traces instead: the platform release is never changed by tm-trace
 	f.StringToStringVar(&s.nodeSelector, "node-selector", nil, "run the collector on nodes with these labels, such as kubernetes.io/hostname=node-1")
 	f.StringVar(&s.image, "collector-image", "", "collector image, for a mirror (default: the OpenTelemetry Collector Contrib image)")
 	f.StringVar(&s.listen, "listen", "0.0.0.0", "host address for the collector ports, with --docker: 127.0.0.1 accepts traces from this host only")
+	f.StringVar(&s.duration, "duration", "", "stop collecting after this time, such as 12h or 2d; the trace files stay for the analysis (default: until tm-trace stop)")
 	return cmd
 }
 
@@ -81,12 +93,19 @@ func startKube(ctx context.Context, o *options, s *startOptions, size resource.Q
 	if ns == "" {
 		ns = kitNamespace
 		if r, err := c.FindRelease(ctx, kube.PlatformNamespace); err == nil && r != nil {
-			return startPlatform(ctx, o, c, r)
+			return startPlatform(ctx, o, s, c, r)
 		}
 	} else if r, err := c.FindRelease(ctx, ns); err != nil {
 		return err
 	} else if r != nil {
-		return startPlatform(ctx, o, c, r)
+		return startPlatform(ctx, o, s, c, r)
+	}
+	if !s.deadline.IsZero() {
+		if t, err := c.FindTarget(ctx, ns); err != nil {
+			return err
+		} else if t.Kind == kube.Kit {
+			return fmt.Errorf("a trace collector already runs in namespace %s; --duration applies to a new one: run tm-trace stop first", ns)
+		}
 	}
 	if o.dryRun {
 		return dryRunCollector(o, s, size, ns)
@@ -107,7 +126,9 @@ func startKube(ctx context.Context, o *options, s *startOptions, size resource.Q
 	if err := c.WaitDeployment(ctx, ns, kube.Collector, 5*time.Minute); err != nil {
 		return err
 	}
-	o.say("The trace collector is ready. Its trace files stay under %s (--max-size).\n", size.String())
+	o.say("The trace collector is ready. Its trace files stay under %s (--max-size).", size.String())
+	sayDeadline(o, s.deadline)
+	o.say("")
 	printSourceSettings(o, fmt.Sprintf("http://%s.%s.svc:4317", kube.Collector, ns))
 	o.say("\nAfter the collection period, run: tm-trace analyze%s", nsFlag(ns))
 	return nil
@@ -120,6 +141,7 @@ func collectorOptions(s *startOptions, size resource.Quantity, ns string) manife
 		StorageClass: s.storageClass,
 		NodeSelector: s.nodeSelector,
 		Image:        s.image,
+		Deadline:     s.deadline,
 	}
 }
 
@@ -133,8 +155,11 @@ func dryRunCollector(o *options, s *startOptions, size resource.Quantity, ns str
 	return printYAML(o.out, append([]any{nsObj}, toAny(col.Objects())...)...)
 }
 
-func startPlatform(ctx context.Context, o *options, c *kube.Client, r *kube.Release) error {
+func startPlatform(ctx context.Context, o *options, s *startOptions, c *kube.Client, r *kube.Release) error {
 	o.say("Found the Tensormesh Platform: release %s, chart %s, namespace %s.", r.Name, r.Version, r.Namespace)
+	if !s.deadline.IsZero() {
+		return errors.New("--duration needs the trace collector of tm-trace; with the Tensormesh Platform, run tm-trace stop at the end of the collection window")
+	}
 	volume, err := c.RequestTraceVolume(ctx, r.Namespace)
 	if err != nil {
 		return err
@@ -170,7 +195,7 @@ func startDocker(ctx context.Context, o *options, s *startOptions, size resource
 	if err != nil {
 		return err
 	}
-	config, err := manifest.DockerConfig(size)
+	config, err := manifest.DockerConfig(size, s.deadline)
 	if err != nil {
 		return err
 	}
@@ -191,11 +216,37 @@ func startDocker(ctx context.Context, o *options, s *startOptions, size resource
 		return nil
 	}
 	host, _ := os.Hostname()
-	o.say("The trace collector is ready. Its trace files in %s stay under %s (--max-size).\n", traceDir(o.dir), size.String())
+	o.say("The trace collector is ready. Its trace files in %s stay under %s (--max-size).", traceDir(o.dir), size.String())
+	sayDeadline(o, s.deadline)
+	o.say("")
 	printSourceSettings(o, fmt.Sprintf("http://%s:4317", host))
 	o.say("\nUse localhost instead of %s for sources on this host with host networking.", host)
 	o.say("\nAfter the collection period, run: tm-trace analyze --docker%s", dirFlag(o.dir))
 	return nil
+}
+
+func sayDeadline(o *options, deadline time.Time) {
+	if !deadline.IsZero() {
+		o.say("It stops collecting at %s (--duration). The trace files stay until tm-trace stop.", deadline.Format("2006-01-02 15:04 MST"))
+	}
+}
+
+// parseDuration reads a Go duration, such as 90m or 12h, or a number of days,
+// such as 2d.
+func parseDuration(v string) (time.Duration, error) {
+	var d time.Duration
+	var err error
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		var n int
+		n, err = strconv.Atoi(days)
+		d = time.Duration(n) * 24 * time.Hour
+	} else {
+		d, err = time.ParseDuration(v)
+	}
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%q is not a positive duration, such as 90m, 12h or 2d", v)
+	}
+	return d, nil
 }
 
 func printSourceSettings(o *options, endpoint string) {

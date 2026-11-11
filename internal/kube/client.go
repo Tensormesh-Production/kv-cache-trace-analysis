@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -29,6 +30,8 @@ type Client struct {
 	K8s     kubernetes.Interface
 	Dynamic dynamic.Interface
 	Out     io.Writer
+	// Config is the connection, for port forwards.
+	Config *rest.Config
 }
 
 // New connects with the user's kubeconfig, like kubectl: the given file or
@@ -58,7 +61,7 @@ func New(kubeconfig, kubeContext string, out io.Writer) (*Client, error) {
 	if _, err := cs.Discovery().ServerVersion(); err != nil {
 		return nil, fmt.Errorf("cannot reach the cluster (%s): %w", cfg.Host, err)
 	}
-	return &Client{K8s: cs, Dynamic: dyn, Out: out}, nil
+	return &Client{K8s: cs, Dynamic: dyn, Out: out, Config: cfg}, nil
 }
 
 func (c *Client) say(format string, args ...any) {

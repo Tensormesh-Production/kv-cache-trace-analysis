@@ -1,7 +1,7 @@
 #!/bin/sh
-# Test of tm-trace without Kubernetes: start (and its free space check),
-# analyze (every format, custom), and stop with Docker or Podman, as the
-# current user.
+# Test of tm-trace without Kubernetes: start (its free space check and
+# --duration), status, analyze (every format, custom), and stop with Docker or
+# Podman, as the current user.
 # Usage: test/tool-docker-test.sh IMAGE TM_TRACE [docker|podman]
 set -eu
 
@@ -34,12 +34,30 @@ if [ -e tm-trace ] || "$runtime" inspect trace-collector > /dev/null 2>&1; then
 fi
 echo "ok start: refused without enough free space"
 
+# --duration: after the deadline, the collector writes no more trace files.
+"$tool" start --runtime "$runtime" --dir timed --max-size 5Gi --duration 1s
+sleep 2
+python3 "$root/test/loader.py" --endpoint http://127.0.0.1:4318 --format both
+sleep 5
+if [ -e timed/traces/request-trace.jsonl ]; then
+    echo "FAIL: trace files written after the deadline"; exit 1
+fi
+"$tool" status --runtime "$runtime" --dir timed | tee status.txt
+grep -q "^Collection stopped at " status.txt
+"$tool" stop --runtime "$runtime" --dir timed --yes
+echo "ok start: --duration stops the collection"
+
 "$tool" start --runtime "$runtime" --max-size 5Gi
 grep -q "max_backups: 8$" tm-trace/collector-config.yaml
 python3 "$root/test/loader.py" --endpoint http://127.0.0.1:4318 --format both
 sleep 5
 [ "$(stat -c %u tm-trace/traces/request-trace.jsonl)" = "$(id -u)" ]
 echo "ok start: trace files owned by the current user"
+
+"$tool" status --runtime "$runtime" | tee status.txt
+grep -q "^Trace collector ($runtime): running" status.txt
+grep -q "^Trace files in tm-trace/traces: [0-9.]* MiB in [1-9][0-9]* file" status.txt
+echo "ok status"
 
 "$tool" analyze --runtime "$runtime" --image "$image" --pull never
 python3 "$root/test/check_report.py" report-lmcache.html "$root/test/expected-lmcache.json"

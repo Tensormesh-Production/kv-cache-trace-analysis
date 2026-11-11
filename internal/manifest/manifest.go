@@ -6,7 +6,10 @@ package manifest
 import (
 	"bytes"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -79,6 +82,8 @@ type CollectorOptions struct {
 	NodeSelector map[string]string
 	Image        string
 	PullPolicy   corev1.PullPolicy
+	// Deadline, if set, is when the collector stops writing trace files.
+	Deadline time.Time
 }
 
 // RenderCollector returns the trace collector objects for opts.
@@ -105,6 +110,9 @@ func RenderCollector(opts CollectorOptions) (*Collector, error) {
 	}
 	config, err := withBackups(c.ConfigMap.Data["config.yaml"], opts.Size)
 	if err != nil {
+		return nil, err
+	}
+	if config, err = WithDeadline(config, opts.Deadline); err != nil {
 		return nil, err
 	}
 	c.ConfigMap.Data["config.yaml"] = config
@@ -186,8 +194,12 @@ func RenderAnalyzer(format string, opts AnalyzerOptions) (*batchv1.Job, error) {
 }
 
 // DockerConfig returns the collector configuration for Docker, sized for size.
-func DockerConfig(size resource.Quantity) ([]byte, error) {
+func DockerConfig(size resource.Quantity, deadline time.Time) ([]byte, error) {
 	config, err := withBackups(string(kit.DockerCollectorConfig), size)
+	if err != nil {
+		return nil, err
+	}
+	config, err = WithDeadline(config, deadline)
 	return []byte(config), err
 }
 
@@ -211,6 +223,51 @@ func withBackups(config string, size resource.Quantity) (string, error) {
 		return "", fmt.Errorf("collector configuration: %q not found", defaultBackups)
 	}
 	return strings.Replace(config, defaultBackups, fmt.Sprintf("max_backups: %d", n), 1), nil
+}
+
+const requestPipeline = "processors: [memory_limiter, filter/request-trace, batch/request-trace]"
+
+// WithDeadline adds a filter to the request trace pipelines that drops every
+// record after deadline, so the collector stops writing trace files then. The
+// files written before stay for the analysis.
+func WithDeadline(config string, deadline time.Time) (string, error) {
+	if deadline.IsZero() {
+		return config, nil
+	}
+	m := regexp.MustCompile(`(?m)^( *)processors:\n`).FindStringSubmatchIndex(config)
+	if m == nil || strings.Count(config, requestPipeline) != 2 {
+		return "", fmt.Errorf("collector configuration: processors not found")
+	}
+	indent := config[m[2]:m[3]]
+	cond := fmt.Sprintf("'UnixSeconds(Now()) > %d'", deadline.Unix())
+	filter := strings.Join([]string{
+		"  filter/deadline:",
+		"    error_mode: ignore",
+		"    traces:",
+		"      span:",
+		"        - " + cond,
+		"    logs:",
+		"      log_record:",
+		"        - " + cond,
+	}, "\n"+indent) + "\n"
+	config = config[:m[1]] + indent + filter + config[m[1]:]
+	return strings.ReplaceAll(config, requestPipeline,
+		"processors: [memory_limiter, filter/deadline, filter/request-trace, batch/request-trace]"), nil
+}
+
+var deadlinePattern = regexp.MustCompile(`UnixSeconds\(Now\(\)\) > (\d+)`)
+
+// Deadline returns the deadline that WithDeadline set in config, if any.
+func Deadline(config string) (time.Time, bool) {
+	m := deadlinePattern.FindStringSubmatch(config)
+	if m == nil {
+		return time.Time{}, false
+	}
+	sec, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(sec, 0), true
 }
 
 func setNamespace(o runtime.Object, ns string) {

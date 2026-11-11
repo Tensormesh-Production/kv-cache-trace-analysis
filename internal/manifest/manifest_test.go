@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"sigs.k8s.io/yaml"
 
 	kit "github.com/tensormesh-production/kv-cache-trace-analysis"
 )
@@ -134,12 +136,61 @@ func TestRenderAnalyzerPlatform(t *testing.T) {
 }
 
 func TestDockerConfig(t *testing.T) {
-	def, err := DockerConfig(resource.MustParse(DefaultSize))
+	def, err := DockerConfig(resource.MustParse(DefaultSize), time.Time{})
 	if err != nil || !bytes.Equal(def, kit.DockerCollectorConfig) {
 		t.Error("default Docker config differs from deploy/docker/collector-config.yaml")
 	}
-	small, _ := DockerConfig(resource.MustParse("5Gi"))
+	small, _ := DockerConfig(resource.MustParse("5Gi"), time.Time{})
 	if !bytes.Contains(small, []byte("max_backups: 8\n")) {
 		t.Error("rotation not sized for 5Gi")
+	}
+}
+
+// --duration: both configurations drop every record after the deadline, in the
+// traces and logs pipelines, and the deadline can be read back.
+func TestDeadline(t *testing.T) {
+	deadline := time.Unix(1794436800, 0)
+	docker, err := DockerConfig(resource.MustParse(DefaultSize), deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	col, err := RenderCollector(CollectorOptions{Namespace: "n", Size: resource.MustParse(DefaultSize), Deadline: deadline})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, config := range map[string]string{"docker": string(docker), "kubernetes": col.ConfigMap.Data["config.yaml"]} {
+		var c struct {
+			Processors map[string]struct {
+				Traces struct{ Span []string } `json:"traces"`
+				Logs   struct {
+					LogRecord []string `json:"log_record"`
+				} `json:"logs"`
+			} `json:"processors"`
+			Service struct {
+				Pipelines map[string]struct{ Processors []string } `json:"pipelines"`
+			} `json:"service"`
+		}
+		if err := yaml.Unmarshal([]byte(config), &c); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		f := c.Processors["filter/deadline"]
+		want := "UnixSeconds(Now()) > 1794436800"
+		if len(f.Traces.Span) != 1 || f.Traces.Span[0] != want || len(f.Logs.LogRecord) != 1 || f.Logs.LogRecord[0] != want {
+			t.Errorf("%s: filter %+v", name, f)
+		}
+		for _, p := range []string{"traces", "logs"} {
+			if got := strings.Join(c.Service.Pipelines[p].Processors, ","); got != "memory_limiter,filter/deadline,filter/request-trace,batch/request-trace" {
+				t.Errorf("%s %s pipeline: %s", name, p, got)
+			}
+		}
+		if got := strings.Join(c.Service.Pipelines["metrics"].Processors, ","); got != "memory_limiter" {
+			t.Errorf("%s metrics pipeline: %s", name, got)
+		}
+		if d, ok := Deadline(config); !ok || !d.Equal(deadline) {
+			t.Errorf("%s: Deadline() = %v %v", name, d, ok)
+		}
+	}
+	if _, ok := Deadline(string(kit.DockerCollectorConfig)); ok {
+		t.Error("Deadline() found a deadline in the default configuration")
 	}
 }

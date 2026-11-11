@@ -1,7 +1,7 @@
 #!/bin/sh
-# End-to-end test of tm-trace on a cluster: start, analyze (every format, one
-# format and model, a custom format, a failure), the Tensormesh Platform path
-# with a stand-in platform collector, and stop.
+# End-to-end test of tm-trace on a cluster: start, status, analyze (every
+# format, one format and model, a custom format, a failure), the Tensormesh
+# Platform path with a stand-in platform collector, and stop.
 # Usage: test/tool-test.sh IMAGE TM_TRACE   (IMAGE must be available to the nodes)
 set -eu
 
@@ -48,7 +48,12 @@ load "$ns" dynamo http://trace-collector:4318
 load "$ns" lmcache http://trace-collector:4318
 sleep 10
 
-# 3. analyze: every format with records, then one format and model, then custom
+# 3. status: the collector's counters
+"$tool" status -n "$ns" | tee status.txt
+grep -q "300 spans (LMCache) and 300 log records (NVIDIA Dynamo)" status.txt
+echo "ok status"
+
+# 4. analyze: every format with records, then one format and model, then custom
 analyze -n "$ns"
 python3 "$root/test/check_report.py" report-lmcache.html "$root/test/expected-lmcache.json"
 python3 "$root/test/check_report.py" report-dynamo.html "$root/test/expected-dynamo.json"
@@ -61,14 +66,14 @@ if [ -n "$(kubectl -n "$ns" get jobs -l app.kubernetes.io/name=trace-analyzer -o
 fi
 echo "ok analyze"
 
-# 4. A failing analysis ends with a clear error
+# 5. A failing analysis ends with a clear error
 if analyze -n "$ns" --format lmcache --model none > fail.txt 2>&1; then
     echo "FAIL: exit 0 for a model without records"; exit 1
 fi
 grep -q "no LMCache trace records for model none" fail.txt
 echo "ok failure"
 
-# 5. Tensormesh Platform path, with a stand-in for the platform collector
+# 6. Tensormesh Platform path, with a stand-in for the platform collector
 kubectl create namespace "$pns"
 sed '/^---$/q' "$root/deploy/collector/trace-collector.yaml" | kubectl -n "$pns" apply -f -
 kubectl -n "$pns" apply -f "$root/test/platform-standin.yaml"
@@ -76,6 +81,9 @@ kubectl -n "$pns" rollout status deployment/tensormesh-platform-otel-collector-c
 kubectl -n "$pns" create configmap trace-loader --from-file="$root/test/loader.py"
 load "$pns" lmcache http://tensormesh-platform-otel-collector-collector:4318
 sleep 10
+"$tool" status -n "$pns" | tee platform-status.txt
+grep -q "^Tensormesh Platform collector in namespace $pns" platform-status.txt
+grep -q " 300 spans (LMCache)" platform-status.txt
 "$tool" start -n "$pns" > platform-start.txt
 cat platform-start.txt
 grep -q -- "^      - --enable-token-trace$" platform-start.txt
@@ -93,7 +101,7 @@ grep -q "helm upgrade tensormesh-platform .* -n $pns --reuse-values -f trace-off
 kubectl delete namespace "$pns" --timeout=5m
 echo "ok platform"
 
-# 6. stop: namespace and volume deleted
+# 7. stop: namespace and volume deleted
 pv=$(kubectl -n "$ns" get pvc trace-collector-data -o jsonpath='{.spec.volumeName}')
 "$tool" stop -n "$ns" --yes
 if kubectl get namespace "$ns" > /dev/null 2>&1 || kubectl get pv "$pv" > /dev/null 2>&1; then
