@@ -1,0 +1,82 @@
+# Test stand-in for the Tensormesh Platform's collector: the chart labels, the
+# collector pod label set by the OTel Operator, and the trace volume name that
+# tm-trace looks for, with the trace collector's configuration (ConfigMap
+# trace-collector). The real chart collector is tested on a cluster.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tensormesh-platform-otel-collector-request-trace
+  labels:
+    app.kubernetes.io/component: otel-collector
+    app.kubernetes.io/instance: tensormesh-platform
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tensormesh-platform-1.0.1
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tensormesh-platform-otel-collector-collector
+  labels:
+    app.kubernetes.io/instance: tensormesh-platform
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: tensormesh-platform-1.0.1
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: opentelemetry-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: opentelemetry-collector
+        app.kubernetes.io/name: tensormesh-platform
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: otelcol
+          image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0
+          args: ["--config=/conf/config.yaml"]
+          ports:
+            - containerPort: 4318
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: trace-collector
+        - name: data
+          persistentVolumeClaim:
+            claimName: tensormesh-platform-otel-collector-request-trace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tensormesh-platform-otel-collector-collector
+spec:
+  selector:
+    app.kubernetes.io/component: opentelemetry-collector
+  ports:
+    - name: otlp-http
+      port: 4318
