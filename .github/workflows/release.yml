@@ -1,7 +1,8 @@
 name: release
 
-# A tag vX.Y.Z publishes the manifests, the Docker collector configuration and the
-# format template as release assets.
+# A tag vX.Y.Z publishes tm-trace for Linux, macOS and Windows (amd64, arm64)
+# with a checksums.txt signed with cosign, and the manifests, the Docker
+# collector configuration, the format template and install.sh as release assets.
 # Tags with a suffix (vX.Y.Z-rc.N) are pre-releases.
 
 on:
@@ -10,23 +11,23 @@ on:
 
 permissions:
   contents: write
+  # Keyless signing: cosign signs with this workflow's GitHub identity.
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Publish release assets
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: sigstore/cosign-installer@v4.1.3
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.20.0
+          args: release --clean
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          prerelease=""
-          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$TAG" --title "$TAG" --generate-notes $prerelease \
-            deploy/collector/trace-collector.yaml \
-            deploy/analyzer/analyzer-dynamo.yaml \
-            deploy/analyzer/analyzer-lmcache.yaml \
-            deploy/analyzer/analyzer-custom.yaml \
-            deploy/docker/collector-config.yaml \
-            tools/custom_format.py
+          GITHUB_TOKEN: ${{ github.token }}

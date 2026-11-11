@@ -1,0 +1,47 @@
+# tm-trace for every release tag: Linux, macOS and Windows on amd64 and arm64,
+# a checksums.txt signed with cosign (keyless, by the release workflow), the
+# manifests that the README steps use, and install.sh, so that
+# releases/latest/download/install.sh always installs the newest release.
+version: 2
+project_name: tm-trace
+
+builds:
+  - main: ./cmd/tm-trace
+    binary: tm-trace
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/tensormesh-production/kv-cache-trace-analysis/internal/cli.Version={{ .Tag }}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "--yes", "${artifact}"]
+
+release:
+  prerelease: auto
+  extra_files:
+    - glob: deploy/collector/trace-collector.yaml
+    - glob: deploy/analyzer/analyzer-*.yaml
+    - glob: deploy/docker/collector-config.yaml
+    - glob: tools/custom_format.py
+    - glob: install.sh
+
+changelog:
+  use: github-native

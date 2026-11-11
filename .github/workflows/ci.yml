@@ -1,7 +1,8 @@
 name: ci
 
 # Pull requests: lint, build and test the image (amd64, arm64), run the Docker
-# test and the end-to-end test on kind, with the newest LMCache release.
+# test and the end-to-end test on kind, with the newest LMCache release. Test
+# tm-trace on Linux, macOS and Windows, and run it with Docker, Podman and kind.
 # Pushes to main that change the image or tests, and manual runs: the same, then
 # publish the tested image as <lmcache-version> and latest.
 # Daily: when the newest LMCache release has no image yet, build, test and
@@ -105,9 +106,49 @@ jobs:
       - name: Kubernetes manifests
         run: |
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
-          ./kubeconform -strict -summary deploy/collector/trace-collector.yaml deploy/analyzer/*.yaml test/loader-job.yaml test/existing-collector.yaml
+          ./kubeconform -strict -summary deploy/collector/trace-collector.yaml deploy/analyzer/*.yaml test/loader-job.yaml test/existing-collector.yaml test/platform-standin.yaml
       - name: Shell scripts
-        run: shellcheck image/analyze.sh test/*.sh
+        run: shellcheck image/analyze.sh install.sh test/*.sh
+
+  go:
+    if: github.event_name != 'schedule'
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Format
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet and unit tests
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Run tm-trace on ${{ runner.os }}
+        shell: bash
+        run: |
+          go build -o tm-trace.exe ./cmd/tm-trace
+          ./tm-trace.exe version
+          ./tm-trace.exe start --dry-run -n test --max-size 10Gi > start.yaml
+          grep -q "max_backups: 16" start.yaml
+          dir="$RUNNER_TEMP/tm-trace"
+          ./tm-trace.exe start --docker --dry-run --dir "$dir" | grep -q -- "--name trace-collector"
+          ./tm-trace.exe analyze --docker --dry-run --dir "$dir" --format lmcache | grep -q "TRACE_FORMAT=lmcache"
+          ./tm-trace.exe stop --docker --dry-run --dir "$dir" | grep -q "rm -f trace-collector"
+          if KUBECONFIG="$RUNNER_TEMP/missing" ./tm-trace.exe analyze 2> error.txt; then exit 1; fi
+          grep -q "^Error: " error.txt && cat error.txt
+      - name: Release build
+        if: runner.os == 'Linux'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.20.0
+          args: release --snapshot --clean --skip=sign
 
   image:
     needs: version
@@ -156,6 +197,25 @@ jobs:
         run: sh test/image-test.sh "${{ steps.build.outputs.ref }}"
       - name: Docker test
         run: sh test/docker-test.sh "${{ steps.build.outputs.ref }}"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: tm-trace with Docker
+        env:
+          REF: ${{ steps.build.outputs.ref }}
+        run: |
+          go build -o tm-trace ./cmd/tm-trace
+          sh test/tool-docker-test.sh "$REF" ./tm-trace docker
+      - name: tm-trace with Podman
+        if: matrix.arch == 'amd64'
+        env:
+          REF: ${{ steps.build.outputs.ref }}
+        run: |
+          case "$REF" in
+            *@*) podman pull "$REF" ;;
+            *) docker save "$REF" | podman load ;;
+          esac
+          sh test/tool-docker-test.sh "$REF" ./tm-trace podman
       - uses: actions/upload-artifact@v7
         if: needs.version.outputs.publish == 'true'
         with:
@@ -182,6 +242,13 @@ jobs:
           kind load docker-image analyzer:ci
       - name: Test
         run: sh test/e2e.sh analyzer:ci
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: tm-trace on kind
+        run: |
+          go build -o tm-trace ./cmd/tm-trace
+          sh test/tool-test.sh analyzer:ci ./tm-trace
 
   publish:
     needs: [version, lint, image, e2e]
