@@ -133,22 +133,25 @@ jobs:
       - name: Run tm-trace on ${{ runner.os }}
         shell: bash
         run: |
-          go build -o tm-trace.exe ./cmd/tm-trace
+          cd "$RUNNER_TEMP"
+          go build -C "$GITHUB_WORKSPACE" -o "$RUNNER_TEMP/tm-trace.exe" ./cmd/tm-trace
           ./tm-trace.exe version
           ./tm-trace.exe start --dry-run -n test --max-size 10Gi > start.yaml
           grep -q "max_backups: 16" start.yaml
-          dir="$RUNNER_TEMP/tm-trace"
-          ./tm-trace.exe start --docker --dry-run --dir "$dir" | grep -q -- "--name trace-collector"
-          ./tm-trace.exe analyze --docker --dry-run --dir "$dir" --format lmcache | grep -q "TRACE_FORMAT=lmcache"
-          ./tm-trace.exe stop --docker --dry-run --dir "$dir" | grep -q "rm -f trace-collector"
+          ./tm-trace.exe start --docker --dry-run --dir tm | grep -q -- "--name trace-collector"
+          ./tm-trace.exe analyze --docker --dry-run --dir tm --format lmcache | grep -q "TRACE_FORMAT=lmcache"
+          ./tm-trace.exe stop --docker --dry-run --dir tm | grep -q "rm -f trace-collector"
           if KUBECONFIG="$RUNNER_TEMP/missing" ./tm-trace.exe analyze 2> error.txt; then exit 1; fi
           grep -q "^Error: " error.txt && cat error.txt
       - name: Release build
         if: runner.os == 'Linux'
-        uses: goreleaser/goreleaser-action@v7
-        with:
-          version: v2.20.0
-          args: release --snapshot --clean --skip=sign
+        # Only GitHub-owned actions are allowed in this repository, so goreleaser
+        # is downloaded and checked against a pinned SHA-256.
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/goreleaser.tar.gz" https://github.com/goreleaser/goreleaser/releases/download/v2.20.1/goreleaser_Linux_x86_64.tar.gz
+          echo "79e0589ca9efd70e8db85158a21334cbb57811d4034b39b61d55789f361341a5  $RUNNER_TEMP/goreleaser.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/goreleaser.tar.gz" -C "$RUNNER_TEMP" goreleaser
+          "$RUNNER_TEMP/goreleaser" release --snapshot --clean --skip=sign
 
   image:
     needs: version
