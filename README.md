@@ -6,7 +6,7 @@ The analysis needs no GPU, no LMCache installation, and no credentials.
 
 ## Requirements
 
-- A Kubernetes cluster and `kubectl`, with permission to create a namespace and to update PersistentVolumes.
+- A Kubernetes cluster and `kubectl`, with permission to create a namespace and to update PersistentVolumes. Without Kubernetes, see [Docker](#docker).
 - Nodes that can pull the analyzer and OpenTelemetry Collector images from `ghcr.io`. Without internet access, copy both images to a local registry and change `image` in the manifests.
 - A default StorageClass for a 50 GiB `ReadWriteOnce` volume. For another class or size, edit the PersistentVolumeClaim in `trace-collector.yaml`.
 - A trace source:
@@ -81,6 +81,42 @@ kubectl patch pv "$(kubectl -n trace-analysis get pvc trace-collector-data -o js
 kubectl delete namespace trace-analysis
 ```
 
+## Docker
+
+Without Kubernetes, the collector and the analyzer run as containers on one host. Both run as the current user, so the trace files in `traces/` belong to that user.
+
+1. Start the collector, then check that `docker logs trace-collector` ends with `Everything is ready`:
+
+   ```bash
+   curl -fsSLO https://github.com/tensormesh-production/kv-cache-trace-analysis/releases/latest/download/collector-config.yaml
+   mkdir -m 700 traces
+   docker run -d --name trace-collector --restart unless-stopped --user "$(id -u):$(id -g)" --cpus 2 --memory 2g \
+     -p 4317:4317 -p 4318:4318 -p 8889:8889 \
+     -v "$PWD/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro" -v "$PWD/traces:/data" \
+     ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.159.0
+   ```
+
+2. Send traces with the settings in [step 2](#2-send-traces), with `http://<collector-host>:4317` as the endpoint.
+
+3. After the collection period, run the analysis in the same folder:
+
+   ```bash
+   FORMAT=dynamo
+   docker run --rm --pull always --network none --user "$(id -u):$(id -g)" --cpus 2 --memory 16g \
+     -v "$PWD/traces:/data:ro" -e TRACE_FORMAT=$FORMAT \
+     ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer > report-$FORMAT.html
+   ```
+
+   - For analyzer options, add `-e ANALYZER_ARGS="--model <name>"`.
+   - For a custom format, set `FORMAT=custom` and add `-v "$PWD/custom_format.py:/formats/custom_format.py:ro"`.
+
+4. Clean up: remove the source settings, then delete the collector and the trace files.
+
+   ```bash
+   docker rm -f trace-collector
+   rm -rf traces
+   ```
+
 ## Existing OpenTelemetry Collector
 
 The trace collector runs next to an existing collector and receives only request traces.
@@ -123,13 +159,14 @@ kubectl -n trace-analysis create configmap trace-format --from-file=custom_forma
 
 ## Sizing
 
-The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and takes about 3 seconds per million tokens. The Job's 16 GiB memory limit covers about 400 million tokens: about 1.8 GB of Dynamo trace files, or 9 GB of LMCache trace files. For larger traces, raise `resources.limits.memory` in the Job manifest, or analyze one model at a time.
+The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and takes about 3 seconds per million tokens. The Job's 16 GiB memory limit covers about 400 million tokens: about 1.8 GB of Dynamo trace files, or 9 GB of LMCache trace files. For larger traces, raise `resources.limits.memory` in the Job manifest (`--memory` with Docker), or analyze one model at a time.
 
 ## Privacy and security
 
-- Trace files hold request content: request payloads for Dynamo, token IDs for LMCache. They stay on the collector's volume. No component sends data out of the cluster.
+- Trace files hold request content: request payloads for Dynamo, token IDs for LMCache. They stay on the collector's volume, or in `traces/` with Docker. No component sends data out of the cluster or the host.
 - The analyzer mounts the volume read-only and makes no network connections.
 - Both pods run as a non-root user with a read-only root filesystem, have no Kubernetes API token, and meet the Pod Security `restricted` profile.
+- With Docker, the collector's ports are open on all host interfaces. To accept traces only from the same host, publish them on `127.0.0.1`, for example `-p 127.0.0.1:4317:4317`.
 - The report holds aggregate numbers and model names only.
 
 ## Troubleshooting

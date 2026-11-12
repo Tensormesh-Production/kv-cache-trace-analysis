@@ -1,6 +1,7 @@
 name: release
 
-# A tag vX.Y.Z publishes the manifests and the format template as release assets.
+# A tag vX.Y.Z publishes the manifests, the Docker collector configuration and the
+# format template as release assets.
 # Tags with a suffix (vX.Y.Z-rc.N) are pre-releases.
 
 on:
@@ -27,4 +28,5 @@ jobs:
             deploy/analyzer/analyzer-dynamo.yaml \
             deploy/analyzer/analyzer-lmcache.yaml \
             deploy/analyzer/analyzer-custom.yaml \
+            deploy/docker/collector-config.yaml \
             tools/custom_format.py
