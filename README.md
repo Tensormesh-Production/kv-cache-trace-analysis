@@ -2,13 +2,13 @@
 
 Measures how much of an LLM workload a KV cache can reuse. A collector stores request traces in the cluster, and an analyzer Job runs the [LMCache](https://github.com/LMCache/LMCache) trace analyzer on them. The result is an HTML report of prefix and non-prefix hit rates for a range of cache sizes.
 
-The analysis needs no GPU, no LMCache installation, and no credentials.
+The analysis needs no GPU, no LMCache installation, and no credentials. `tm-trace` runs it with one command per step, on Kubernetes or with Docker.
 
 ## Requirements
 
-- A Kubernetes cluster and `kubectl`, with permission to create a namespace and to update PersistentVolumes. Without Kubernetes, see [Docker](#docker).
-- Nodes that can pull the analyzer and OpenTelemetry Collector images from `ghcr.io`. Without internet access, copy both images to a local registry and change `image` in the manifests.
-- A default StorageClass for a 50 GiB `ReadWriteOnce` volume. For another class or size, edit the PersistentVolumeClaim in `trace-collector.yaml`.
+- A Kubernetes cluster, with permission to create a namespace and to update PersistentVolumes, or a host with Docker or Podman.
+- Nodes or hosts that can pull the analyzer and OpenTelemetry Collector images from `ghcr.io`. Without internet access, copy both images to a local registry, and use `--image` and `--collector-image` (or change `image` in the manifests).
+- On Kubernetes, a default StorageClass for a 50 GiB `ReadWriteOnce` volume. `--max-size` and `--storage-class` change it.
 - A trace source:
   - NVIDIA Dynamo 1.4 or later, or
   - LMCache 0.5.7 or later in multiprocess (MP) mode, or
@@ -16,6 +16,46 @@ The analysis needs no GPU, no LMCache installation, and no credentials.
 - Network access from the trace source to the collector on port 4317.
 
 ## Quickstart
+
+Install `tm-trace` on macOS or Linux. On Windows, download the zip from the [latest release](https://github.com/tensormesh-production/kv-cache-trace-analysis/releases/latest).
+
+```bash
+curl -sSfL https://github.com/tensormesh-production/kv-cache-trace-analysis/releases/latest/download/install.sh | sh
+```
+
+It uses the current kubectl context. `--context` and `--kubeconfig` pick another.
+
+1. Deploy the collector. It prints the settings for the trace source.
+
+   ```bash
+   tm-trace start
+   ```
+
+2. Set them on NVIDIA Dynamo or LMCache, and let it collect traffic. To see how much it has collected so far:
+
+   ```bash
+   tm-trace status
+   ```
+
+3. Run the analysis. It saves one report per trace format, such as `report-lmcache.html`.
+
+   ```bash
+   tm-trace analyze
+   ```
+
+4. Delete the collector and the trace files.
+
+   ```bash
+   tm-trace stop
+   ```
+
+- With the Tensormesh Platform, `tm-trace` finds it in namespace `tensormesh-platform` (`-n` for another). `start` and `stop` print the settings and the helm command that turn its request traces on and off, and `analyze` uses its collector.
+- Without Kubernetes, add `--docker` to each command. It uses Docker or Podman on this host, and keeps the trace files in `tm-trace/traces`.
+- The trace files stay under `--max-size` (default 50 GiB). On Kubernetes, it is the volume size. With `--docker`, `start` checks that the disk has that much free space.
+- `start --duration 24h` stops collecting after that time, for example to keep to an approved collection window. The trace files stay until `stop`.
+- `tm-trace <command> --help` lists the options, such as `--model`, `--custom-format`, `--image` for mirrors, and `--dry-run` to see what would run.
+
+## Manual steps with kubectl
 
 ### 1. Deploy the collector
 
@@ -81,9 +121,9 @@ kubectl patch pv "$(kubectl -n trace-analysis get pvc trace-collector-data -o js
 kubectl delete namespace trace-analysis
 ```
 
-## Docker
+## Manual steps with Docker
 
-Without Kubernetes, the collector and the analyzer run as containers on one host. Both run as the current user, so the trace files in `traces/` belong to that user.
+Without Kubernetes, the collector and the analyzer run as containers on one host. Both run as the current user, so the trace files in `traces/` belong to that user. The trace files take up to 41 GiB of the host's disk (the newest 80 files of 512 MB): check the free space with `df -h .` first, and for a smaller disk, lower `max_backups` in `collector-config.yaml`.
 
 1. Start the collector, then check that `docker logs trace-collector` ends with `Everything is ready`:
 
@@ -136,7 +176,7 @@ A KV cache is not shared between models. If the report lists several models, run
 
 ## Analyzer options
 
-`ANALYZER_ARGS` in the Job manifest passes options to `lmcache bench trace-analyze`, such as `--model <name>`, `--chunk-size`, and `--capacity`. Download the manifest, set the value, then apply the file:
+With `tm-trace`, use `--model` and `--analyzer-args`. In the manual steps, `ANALYZER_ARGS` in the Job manifest passes options to `lmcache bench trace-analyze`, such as `--model <name>`, `--chunk-size`, and `--capacity`. Download the manifest, set the value, then apply the file:
 
 ```bash
 FORMAT=dynamo
@@ -146,7 +186,7 @@ kubectl -n trace-analysis apply -f analyzer-$FORMAT.yaml
 
 ## Custom trace formats
 
-For other trace sources, implement `read()` in `custom_format.py`. The file describes its input and output. Load it into the cluster, then run the analysis with `FORMAT=custom`:
+For other trace sources, implement `read()` in `custom_format.py`. The file describes its input and output. Then run `tm-trace analyze --custom-format custom_format.py`. In the manual steps, load it into the cluster, then run the analysis with `FORMAT=custom`:
 
 ```bash
 curl -fsSLO https://github.com/tensormesh-production/kv-cache-trace-analysis/releases/latest/download/custom_format.py
@@ -159,7 +199,7 @@ kubectl -n trace-analysis create configmap trace-format --from-file=custom_forma
 
 ## Sizing
 
-The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and takes about 3 seconds per million tokens. The Job's 16 GiB memory limit covers about 400 million tokens: about 1.8 GB of Dynamo trace files, or 9 GB of LMCache trace files. For larger traces, raise `resources.limits.memory` in the Job manifest (`--memory` with Docker), or analyze one model at a time.
+The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and takes about 3 seconds per million tokens. The Job's 16 GiB memory limit covers about 400 million tokens: about 1.8 GB of Dynamo trace files, or 9 GB of LMCache trace files. For larger traces, raise the memory limit (`--memory` with `tm-trace` or Docker, `resources.limits.memory` in the Job manifest), or analyze one model at a time.
 
 ## Privacy and security
 
@@ -168,6 +208,8 @@ The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and tak
 - Both pods run as a non-root user with a read-only root filesystem, have no Kubernetes API token, and meet the Pod Security `restricted` profile.
 - With Docker, the collector's ports are open on all host interfaces. To accept traces only from the same host, publish them on `127.0.0.1`, for example `-p 127.0.0.1:4317:4317`.
 - The report holds aggregate numbers and model names only.
+- `tm-trace` applies these same manifests. It changes nothing outside its namespace, except the trace volume's reclaim policy at `stop`, and never changes a Tensormesh Platform release.
+- Releases include `checksums.txt`, signed with cosign by the release workflow. The installer checks the checksum, and the signature when cosign is installed.
 
 ## Troubleshooting
 
@@ -183,8 +225,18 @@ The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and tak
 `ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer`, for `linux/amd64` and `linux/arm64`:
 
 - Python 3.12 slim, the LMCache wheel, and only the packages the analyzer imports, with CPU-only PyTorch. About 0.4 GB compressed.
-- Tags: `latest` and the LMCache version, such as `0.5.7`. New LMCache releases are checked daily, then built, tested, and published automatically. A release that fails a test is not published.
+- Tags: `latest` and the LMCache version, such as `0.5.7`. New stable LMCache releases are checked daily, then built, tested, and published automatically. A release that fails a test is not published.
+- Image tags follow LMCache versions; release versions, such as `v0.1.0`, are for `tm-trace` and the manifests. To use one LMCache version, pass `--image` with that tag, or set `image` in the Job manifest.
 - Built from [`image/`](image/) with hash-pinned requirements.
+- From the next LMCache release on, each published image carries an SBOM and is signed with cosign by the CI workflow. To check the signature:
+
+  ```bash
+  cosign verify ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer:latest \
+    --certificate-identity https://github.com/Tensormesh-Production/kv-cache-trace-analysis/.github/workflows/ci.yml@refs/heads/main \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+  To read the SBOM: `docker buildx imagetools inspect ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer:latest --format '{{json .SBOM}}'`.
 
 ## License
 

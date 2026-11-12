@@ -1,9 +1,11 @@
 name: ci
 
 # Pull requests: lint, build and test the image (amd64, arm64), run the Docker
-# test and the end-to-end test on kind, with the newest LMCache release.
+# test and the end-to-end test on kind, with the newest LMCache release. Test
+# tm-trace on Linux, macOS and Windows, and run it with Docker, Podman and kind.
 # Pushes to main that change the image or tests, and manual runs: the same, then
-# publish the tested image as <lmcache-version> and latest.
+# publish the tested image as <lmcache-version> and latest, with an SBOM, and
+# sign it with cosign.
 # Daily: when the newest LMCache release has no image yet, build, test and
 # publish it the same way. A failed test publishes nothing.
 
@@ -105,14 +107,61 @@ jobs:
       - name: Kubernetes manifests
         run: |
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar -xz kubeconform
-          ./kubeconform -strict -summary deploy/collector/trace-collector.yaml deploy/analyzer/*.yaml test/loader-job.yaml test/existing-collector.yaml
+          ./kubeconform -strict -summary deploy/collector/trace-collector.yaml deploy/analyzer/*.yaml test/loader-job.yaml test/existing-collector.yaml test/platform-standin.yaml
       - name: Shell scripts
-        run: shellcheck image/analyze.sh test/*.sh
+        run: shellcheck image/analyze.sh install.sh test/*.sh
+
+  go:
+    if: github.event_name != 'schedule'
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Format
+        if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: Vet and unit tests
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Run tm-trace on ${{ runner.os }}
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          go build -C "$GITHUB_WORKSPACE" -o "$RUNNER_TEMP/tm-trace.exe" ./cmd/tm-trace
+          ./tm-trace.exe version
+          ./tm-trace.exe start --dry-run -n test --max-size 10Gi > start.yaml
+          grep -q "max_backups: 16" start.yaml
+          ./tm-trace.exe start --docker --dry-run --dir tm | grep -q -- "--name trace-collector"
+          ./tm-trace.exe analyze --docker --dry-run --dir tm --format lmcache | grep -q "TRACE_FORMAT=lmcache"
+          ./tm-trace.exe stop --docker --dry-run --dir tm | grep -q "rm -f trace-collector"
+          if KUBECONFIG="$RUNNER_TEMP/missing" ./tm-trace.exe analyze 2> error.txt; then exit 1; fi
+          grep -q "^Error: " error.txt && cat error.txt
+      - name: Release build
+        if: runner.os == 'Linux'
+        # Only GitHub-owned actions are allowed in this repository, so goreleaser
+        # is downloaded and checked against a pinned SHA-256.
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/goreleaser.tar.gz" https://github.com/goreleaser/goreleaser/releases/download/v2.20.1/goreleaser_Linux_x86_64.tar.gz
+          echo "79e0589ca9efd70e8db85158a21334cbb57811d4034b39b61d55789f361341a5  $RUNNER_TEMP/goreleaser.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/goreleaser.tar.gz" -C "$RUNNER_TEMP" goreleaser
+          "$RUNNER_TEMP/goreleaser" release --snapshot --clean --skip=sign
 
   image:
     needs: version
     if: needs.version.outputs.build == 'true'
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -138,11 +187,13 @@ jobs:
           if [ "$PUBLISH" = true ]; then
             echo "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
             output="type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true"
+            sbom=true
           else
             output="type=docker,name=analyzer:ci"
+            sbom=false
           fi
           docker buildx build --platform "linux/$ARCH" --build-arg "LMCACHE_VERSION=$LMCACHE" \
-            --output "$output" --metadata-file meta.json image
+            --sbom="$sbom" --output "$output" --metadata-file meta.json image
           if [ "$PUBLISH" = true ]; then
             digest=$(python3 -c 'import json; print(json.load(open("meta.json"))["containerimage.digest"])')
             docker pull "$IMAGE@$digest"
@@ -156,6 +207,25 @@ jobs:
         run: sh test/image-test.sh "${{ steps.build.outputs.ref }}"
       - name: Docker test
         run: sh test/docker-test.sh "${{ steps.build.outputs.ref }}"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: tm-trace with Docker
+        env:
+          REF: ${{ steps.build.outputs.ref }}
+        run: |
+          go build -o tm-trace ./cmd/tm-trace
+          sh test/tool-docker-test.sh "$REF" ./tm-trace docker
+      - name: tm-trace with Podman
+        if: matrix.arch == 'amd64'
+        env:
+          REF: ${{ steps.build.outputs.ref }}
+        run: |
+          case "$REF" in
+            *@*) podman pull "$REF" ;;
+            *) docker save "$REF" | podman load ;;
+          esac
+          sh test/tool-docker-test.sh "$REF" ./tm-trace podman
       - uses: actions/upload-artifact@v7
         if: needs.version.outputs.publish == 'true'
         with:
@@ -165,6 +235,7 @@ jobs:
   e2e:
     needs: version
     if: needs.version.outputs.build == 'true'
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -182,6 +253,13 @@ jobs:
           kind load docker-image analyzer:ci
       - name: Test
         run: sh test/e2e.sh analyzer:ci
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: tm-trace on kind
+        run: |
+          go build -o tm-trace ./cmd/tm-trace
+          sh test/tool-test.sh analyzer:ci ./tm-trace
 
   publish:
     needs: [version, lint, image, e2e]
@@ -190,6 +268,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Keyless signing: cosign signs with this workflow's GitHub identity.
+      id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -208,3 +288,14 @@ jobs:
           if [ "$LATEST" = true ]; then tags+=(-t "$IMAGE:latest"); fi
           docker buildx imagetools create "${tags[@]}" "$IMAGE@$(cat digests/amd64)" "$IMAGE@$(cat digests/arm64)"
           docker buildx imagetools inspect "$IMAGE:$LMCACHE"
+      - name: Sign the image
+        env:
+          LMCACHE: ${{ needs.version.outputs.lmcache }}
+        # Only GitHub-owned actions are allowed in this repository, so cosign is
+        # downloaded and checked against a pinned SHA-256.
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/cosign" https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  $RUNNER_TEMP/cosign" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/cosign"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$LMCACHE" --format '{{json .Manifest}}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["digest"])')
+          "$RUNNER_TEMP/cosign" sign --yes "$IMAGE@$digest"

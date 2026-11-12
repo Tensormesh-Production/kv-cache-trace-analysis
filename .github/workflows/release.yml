@@ -1,7 +1,8 @@
 name: release
 
-# A tag vX.Y.Z publishes the manifests, the Docker collector configuration and the
-# format template as release assets.
+# A tag vX.Y.Z publishes tm-trace for Linux, macOS and Windows (amd64, arm64)
+# with a checksums.txt signed with cosign, and the manifests, the Docker
+# collector configuration, the format template and install.sh as release assets.
 # Tags with a suffix (vX.Y.Z-rc.N) are pre-releases.
 
 on:
@@ -10,23 +11,34 @@ on:
 
 permissions:
   contents: write
+  # Keyless signing: cosign signs with this workflow's GitHub identity.
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Publish release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Only GitHub-owned actions are allowed in this repository, so goreleaser
+      # and cosign are downloaded and checked against pinned SHA-256 sums.
+      - name: Install goreleaser and cosign
         run: |
-          prerelease=""
-          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$TAG" --title "$TAG" --generate-notes $prerelease \
-            deploy/collector/trace-collector.yaml \
-            deploy/analyzer/analyzer-dynamo.yaml \
-            deploy/analyzer/analyzer-lmcache.yaml \
-            deploy/analyzer/analyzer-custom.yaml \
-            deploy/docker/collector-config.yaml \
-            tools/custom_format.py
+          cd "$RUNNER_TEMP"
+          curl -fsSLo goreleaser.tar.gz https://github.com/goreleaser/goreleaser/releases/download/v2.20.1/goreleaser_Linux_x86_64.tar.gz
+          curl -fsSLo cosign https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          sha256sum -c - <<'EOF'
+          79e0589ca9efd70e8db85158a21334cbb57811d4034b39b61d55789f361341a5  goreleaser.tar.gz
+          424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  cosign
+          EOF
+          tar -xzf goreleaser.tar.gz goreleaser
+          chmod +x cosign
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: goreleaser release --clean
