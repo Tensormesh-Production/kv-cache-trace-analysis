@@ -27,7 +27,8 @@ const (
 // Runtime is the docker or podman command.
 type Runtime struct {
 	Bin string
-	// Rootless podman maps the user with --userns=keep-id instead of --user.
+	// Rootless podman also needs --userns=keep-id, so that --user maps to the
+	// same user on the host.
 	Rootless bool
 	// NoLimits: rootless podman without the cpu and memory cgroup controllers
 	// cannot set --cpus and --memory.
@@ -163,10 +164,10 @@ func (r *Runtime) Analyze(ctx context.Context, o AnalyzeOptions) ([]byte, error)
 	if _, err := os.Stat(traces); err != nil {
 		return nil, fmt.Errorf("no trace folder at %s: run tm-trace start --docker first, or set --dir", traces)
 	}
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := r.command(ctx, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err = cmd.Run()
+	err = run(cmd)
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		if exit.ExitCode() == 137 {
@@ -253,10 +254,13 @@ func (r *Runtime) userArgs() []string {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
+	user := []string{"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
 	if r.Rootless {
-		return []string{"--userns=keep-id"}
+		// keep-id maps the current user to the same ids in the container;
+		// --user then runs the process as that user instead of the image's.
+		return append([]string{"--userns=keep-id"}, user...)
 	}
-	return []string{"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())}
+	return user
 }
 
 func (r *Runtime) limits(cpus, memory string) []string {
@@ -267,18 +271,38 @@ func (r *Runtime) limits(cpus, memory string) []string {
 }
 
 func (r *Runtime) output(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := r.command(ctx, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return "", fmt.Errorf("%s %s: %s", r.Bin, args[0], strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
 }
 
 func (r *Runtime) combined(ctx context.Context, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, r.Bin, args...).CombinedOutput()
-	return string(out), err
+	cmd := r.command(ctx, args...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := run(cmd)
+	return out.String(), err
+}
+
+// command runs the container runtime. Podman's helper processes, such as
+// conmon and rootlessport, keep its output pipes open after podman run -d
+// exits, so Wait stops waiting for them soon after the command ends.
+func (r *Runtime) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd.WaitDelay = 2 * time.Second
+	return cmd
+}
+
+// run runs cmd. Pipes left open by its helper processes are not an error.
+func run(cmd *exec.Cmd) error {
+	if err := cmd.Run(); !errors.Is(err, exec.ErrWaitDelay) {
+		return err
+	}
+	return nil
 }
 
 func publish(listen, port string) string {

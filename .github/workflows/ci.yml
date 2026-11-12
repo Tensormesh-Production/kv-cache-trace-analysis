@@ -112,7 +112,9 @@ jobs:
 
   go:
     if: github.event_name != 'schedule'
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -156,7 +158,9 @@ jobs:
   image:
     needs: version
     if: needs.version.outputs.build == 'true'
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -228,6 +232,7 @@ jobs:
   e2e:
     needs: version
     if: needs.version.outputs.build == 'true'
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
