@@ -228,6 +228,15 @@ The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and tak
 - Tags: `latest` and the LMCache version, such as `0.5.7`. New stable LMCache releases are checked daily, then built, tested, and published automatically. A release that fails a test is not published.
 - Image tags follow LMCache versions; release versions, such as `v0.1.0`, are for `tm-trace` and the manifests. To use one LMCache version, pass `--image` with that tag, or set `image` in the Job manifest.
 - Built from [`image/`](image/) with hash-pinned requirements.
+- From the next LMCache release on, each published image carries an SBOM and is signed with cosign by the CI workflow. To check the signature:
+
+  ```bash
+  cosign verify ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer:latest \
+    --certificate-identity https://github.com/Tensormesh-Production/kv-cache-trace-analysis/.github/workflows/ci.yml@refs/heads/main \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
+  To read the SBOM: `docker buildx imagetools inspect ghcr.io/tensormesh-production/kv-cache-trace-analysis/analyzer:latest --format '{{json .SBOM}}'`.
 
 ## License
 
