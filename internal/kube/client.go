@@ -68,7 +68,8 @@ func (c *Client) say(format string, args ...any) {
 	fmt.Fprintf(c.Out, format+"\n", args...)
 }
 
-// EnsureNamespace creates the namespace if it does not exist.
+// EnsureNamespace creates the namespace if it does not exist, labeled as
+// created by tm-trace. An existing namespace is left as it is.
 func (c *Client) EnsureNamespace(ctx context.Context, ns string) error {
 	_, err := c.K8s.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
 	if err == nil {
@@ -77,8 +78,10 @@ func (c *Client) EnsureNamespace(ctx context.Context, ns string) error {
 	if !apierrors.IsNotFound(err) {
 		return err
 	}
-	_, err = c.K8s.CoreV1().Namespaces().Create(ctx,
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{FieldManager: FieldManager})
+	_, err = c.K8s.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name:   ns,
+		Labels: map[string]string{ManagedByLabel: FieldManager},
+	}}, metav1.CreateOptions{FieldManager: FieldManager})
 	if err == nil {
 		c.say("Created namespace %s", ns)
 	}

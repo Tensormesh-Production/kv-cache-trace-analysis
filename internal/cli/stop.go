@@ -15,7 +15,8 @@ func newStop(o *options) *cobra.Command {
 		Use:   "stop",
 		Short: "Delete the trace collector and the trace files",
 		Long: `Deletes the analyzer Jobs, the trace collector and its volume with all trace
-files. Trace files hold request content, so run it after the analysis.
+files. Trace files hold request content, so run it after the analysis. It deletes
+the namespace too only if tm-trace start created it and no other apps run in it.
 
 With the Tensormesh Platform, deletes the analyzer Jobs, sets the trace volume to
 be deleted with its claim, and prints the settings and the helm command that turn
@@ -42,6 +43,13 @@ func stopKube(ctx context.Context, o *options) error {
 	if t.Kind == kube.Platform {
 		return stopPlatform(ctx, o, c, t)
 	}
+	owns, err := c.OwnsNamespace(ctx, t.Namespace)
+	if err != nil {
+		return err
+	}
+	if !owns {
+		return stopCollector(ctx, o, c, t)
+	}
 	if err := o.confirm(fmt.Sprintf("Delete namespace %s with the trace collector and all trace files?", t.Namespace)); err != nil {
 		return err
 	}
@@ -61,6 +69,32 @@ func stopKube(ctx context.Context, o *options) error {
 		return err
 	}
 	o.say("Deleted namespace %s and its trace volume.", t.Namespace)
+	o.say("Remove the LMCache flags and the Dynamo environment variables from the trace sources.")
+	return nil
+}
+
+// stopCollector deletes only tm-trace's objects in a namespace that tm-trace
+// did not create, or that other apps use.
+func stopCollector(ctx context.Context, o *options, c *kube.Client, t *kube.Target) error {
+	if err := o.confirm(fmt.Sprintf("Delete the trace collector and all trace files in namespace %s? The namespace and its other apps stay.", t.Namespace)); err != nil {
+		return err
+	}
+	if o.dryRun {
+		o.say("Would delete the analyzer Jobs, the trace collector and its volume %s, and keep namespace %s.", kube.Volume, t.Namespace)
+		return nil
+	}
+	if err := c.DeleteAnalyzers(ctx, t.Namespace); err != nil {
+		return err
+	}
+	pv, err := c.DeleteVolumeWithClaim(ctx, t.Namespace, kube.Volume)
+	if err != nil {
+		return err
+	}
+	o.say("Deleting the trace collector and its trace files in namespace %s...", t.Namespace)
+	if err := c.DeleteCollector(ctx, t.Namespace, pv, 5*time.Minute); err != nil {
+		return err
+	}
+	o.say("Deleted the trace collector and its trace volume. Namespace %s stays.", t.Namespace)
 	o.say("Remove the LMCache flags and the Dynamo environment variables from the trace sources.")
 	return nil
 }

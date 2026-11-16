@@ -50,6 +50,7 @@ It uses the current kubectl context. `--context` and `--kubeconfig` pick another
    ```
 
 - With the Tensormesh Platform, `tm-trace` finds it in namespace `tensormesh-platform` (`-n` for another). `start` and `stop` print the settings and the helm command that turn its request traces on and off, and `analyze` uses its collector.
+- `start -n` also works in an existing namespace. `stop` deletes the namespace only if `start` created it and no other apps run in it; otherwise it deletes only the collector and its volume.
 - Without Kubernetes, add `--docker` to each command. It uses Docker or Podman on this host, and keeps the trace files in `tm-trace/traces`.
 - The trace files stay under `--max-size` (default 50 GiB). On Kubernetes, it is the volume size. With `--docker`, `start` checks that the disk has that much free space.
 - `start --duration 24h` stops collecting after that time, for example to keep to an approved collection window. The trace files stay until `stop`.

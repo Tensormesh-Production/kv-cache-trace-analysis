@@ -1,7 +1,8 @@
 #!/bin/sh
 # End-to-end test of tm-trace on a cluster: start, status, analyze (every
 # format, one format and model, a custom format, a failure), the Tensormesh
-# Platform path with a stand-in platform collector, and stop.
+# Platform path with a stand-in platform collector, and stop (also in a
+# namespace that existed before start).
 # Usage: test/tool-test.sh IMAGE TM_TRACE   (IMAGE must be available to the nodes)
 set -eu
 
@@ -11,12 +12,13 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 ns=tm-trace-test
 pns=tm-trace-platform
+own=tm-trace-existing
 
 finish() {
     status=$?
     if [ "$status" -ne 0 ]; then
         echo "tool test failed (exit $status). Cluster state:"
-        for n in "$ns" "$pns"; do
+        for n in "$ns" "$pns" "$own"; do
             kubectl -n "$n" get all,pvc -o wide || true
             kubectl -n "$n" get events --sort-by=.lastTimestamp || true
         done
@@ -108,3 +110,20 @@ if kubectl get namespace "$ns" > /dev/null 2>&1 || kubectl get pv "$pv" > /dev/n
     echo "FAIL: namespace or volume left"; exit 1
 fi
 echo "ok stop"
+
+# 8. stop in a namespace that existed before start: the namespace and its other
+# objects stay, the collector and its volume go
+kubectl create namespace "$own"
+kubectl -n "$own" create configmap keep-me --from-literal=keep=yes
+"$tool" start -n "$own" --max-size 5Gi > own-start.txt
+pv=$(kubectl -n "$own" get pvc trace-collector-data -o jsonpath='{.spec.volumeName}')
+"$tool" stop -n "$own" --yes > own-stop.txt
+cat own-stop.txt
+grep -q "Namespace $own stays" own-stop.txt
+kubectl -n "$own" get configmap keep-me > /dev/null
+left=$(kubectl -n "$own" get deploy,svc,cm,pvc -l app.kubernetes.io/name=trace-collector -o name)
+if [ -n "$left" ] || kubectl get pv "$pv" > /dev/null 2>&1; then
+    echo "FAIL: collector objects or volume left: $left"; exit 1
+fi
+kubectl delete namespace "$own" --timeout=5m
+echo "ok stop in an existing namespace"
