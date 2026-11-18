@@ -111,7 +111,8 @@ func (c *Client) DeleteAnalyzers(ctx context.Context, ns string) error {
 
 // DeleteVolumeWithClaim makes the volume bound to claim deletable with it:
 // with a Retain storage class, the data would stay after the claim is gone.
-// It returns the volume name, or "" if the claim is not bound.
+// It returns the volume name, or "" if the claim is not bound or there is no
+// permission to change the volume, as for a project user on OpenShift.
 func (c *Client) DeleteVolumeWithClaim(ctx context.Context, ns, claim string) (string, error) {
 	pvc, err := c.K8s.CoreV1().PersistentVolumeClaims(ns).Get(ctx, claim, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -126,6 +127,10 @@ func (c *Client) DeleteVolumeWithClaim(ctx context.Context, ns, claim string) (s
 	}
 	patch := []byte(`{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}`)
 	_, err = c.K8s.CoreV1().PersistentVolumes().Patch(ctx, pv, types.MergePatchType, patch, metav1.PatchOptions{})
+	if apierrors.IsForbidden(err) {
+		c.say("No permission to change volume %s. If its storage class keeps volumes, the trace files stay after the claim is deleted; a cluster admin can delete them with: kubectl delete pv %s", pv, pv)
+		return "", nil
+	}
 	if err != nil {
 		return "", fmt.Errorf("set volume %s to be deleted with its claim: %w", pv, err)
 	}

@@ -135,6 +135,51 @@ func TestRenderAnalyzerPlatform(t *testing.T) {
 	}
 }
 
+// On OpenShift, the pods have no fixed user and group ids, and nothing else changes.
+func TestRenderOpenShift(t *testing.T) {
+	opts := CollectorOptions{Namespace: "ns", Size: resource.MustParse(DefaultSize)}
+	want, err := RenderCollector(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.OpenShift = true
+	got, err := RenderCollector(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := want.Deployment.Spec.Template.Spec.SecurityContext
+	if sc.RunAsUser == nil || sc.RunAsGroup == nil || sc.FSGroup == nil {
+		t.Fatal("the collector manifest has no fixed ids to remove")
+	}
+	sc.RunAsUser, sc.RunAsGroup, sc.FSGroup = nil, nil, nil
+	for i, o := range got.Objects() {
+		if !equality.Semantic.DeepEqual(o, want.Objects()[i]) {
+			t.Errorf("collector object %d (%T) differs beyond the ids", i, o)
+		}
+	}
+	for _, format := range Formats {
+		want, err := RenderAnalyzer(format, AnalyzerOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := RenderAnalyzer(format, AnalyzerOptions{OpenShift: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc := want.Spec.Template.Spec.SecurityContext
+		if sc.RunAsUser == nil || sc.RunAsGroup == nil {
+			t.Fatalf("%s: the analyzer manifest has no fixed ids to remove", format)
+		}
+		sc.RunAsUser, sc.RunAsGroup, sc.FSGroup = nil, nil, nil
+		if !equality.Semantic.DeepEqual(got, want) {
+			t.Errorf("%s: analyzer Job differs beyond the ids", format)
+		}
+		if p := got.Spec.Template.Spec.SecurityContext; p.RunAsNonRoot == nil || !*p.RunAsNonRoot || p.SeccompProfile == nil {
+			t.Errorf("%s: runAsNonRoot or seccomp lost", format)
+		}
+	}
+}
+
 func TestDockerConfig(t *testing.T) {
 	def, err := DockerConfig(resource.MustParse(DefaultSize), time.Time{})
 	if err != nil || !bytes.Equal(def, kit.DockerCollectorConfig) {
