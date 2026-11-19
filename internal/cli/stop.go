@@ -68,7 +68,11 @@ func stopKube(ctx context.Context, o *options) error {
 	if err := c.DeleteNamespace(ctx, t.Namespace, pv, 5*time.Minute); err != nil {
 		return err
 	}
-	o.say("Deleted namespace %s and its trace volume.", t.Namespace)
+	if pv == "" {
+		o.say("Deleted namespace %s.", t.Namespace)
+	} else {
+		o.say("Deleted namespace %s and its trace volume.", t.Namespace)
+	}
 	o.say("Remove the LMCache flags and the Dynamo environment variables from the trace sources.")
 	return nil
 }
@@ -94,7 +98,11 @@ func stopCollector(ctx context.Context, o *options, c *kube.Client, t *kube.Targ
 	if err := c.DeleteCollector(ctx, t.Namespace, pv, 5*time.Minute); err != nil {
 		return err
 	}
-	o.say("Deleted the trace collector and its trace volume. Namespace %s stays.", t.Namespace)
+	if pv == "" {
+		o.say("Deleted the trace collector and its volume claim. Namespace %s stays.", t.Namespace)
+	} else {
+		o.say("Deleted the trace collector and its trace volume. Namespace %s stays.", t.Namespace)
+	}
 	o.say("Remove the LMCache flags and the Dynamo environment variables from the trace sources.")
 	return nil
 }
@@ -111,10 +119,15 @@ func stopPlatform(ctx context.Context, o *options, c *kube.Client, t *kube.Targe
 		if err := c.DeleteAnalyzers(ctx, t.Namespace); err != nil {
 			return err
 		}
-		if _, err := c.DeleteVolumeWithClaim(ctx, t.Namespace, t.Volume); err != nil {
+		pv, err := c.DeleteVolumeWithClaim(ctx, t.Namespace, t.Volume)
+		if err != nil {
 			return err
 		}
-		o.say("Deleted the analyzer Jobs. The trace volume is now deleted with its claim.")
+		if pv == "" {
+			o.say("Deleted the analyzer Jobs.")
+		} else {
+			o.say("Deleted the analyzer Jobs. The trace volume is now deleted with its claim.")
+		}
 	}
 	if r == nil {
 		o.say("Turn off request traces in the platform release: set observability.traces.requestTrace.enabled to false, and remove %s from engine.spec.extraArgs.", kube.TokenTraceFlag)

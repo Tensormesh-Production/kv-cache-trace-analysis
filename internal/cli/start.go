@@ -22,6 +22,7 @@ type startOptions struct {
 	maxSize, storageClass, image, listen, duration string
 	nodeSelector                                   map[string]string
 	deadline                                       time.Time
+	openshift                                      bool
 }
 
 // traceValuesFile and traceOnValues turn on the platform's request traces,
@@ -107,6 +108,9 @@ func startKube(ctx context.Context, o *options, s *startOptions, size resource.Q
 			return fmt.Errorf("a trace collector already runs in namespace %s; --duration applies to a new one: run tm-trace stop first", ns)
 		}
 	}
+	if s.openshift, err = c.IsOpenShift(); err != nil {
+		return err
+	}
 	if o.dryRun {
 		return dryRunCollector(o, s, size, ns)
 	}
@@ -142,6 +146,7 @@ func collectorOptions(s *startOptions, size resource.Quantity, ns string) manife
 		NodeSelector: s.nodeSelector,
 		Image:        s.image,
 		Deadline:     s.deadline,
+		OpenShift:    s.openshift,
 	}
 }
 

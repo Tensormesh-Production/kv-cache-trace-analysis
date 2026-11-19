@@ -68,6 +68,21 @@ func (c *Client) say(format string, args ...any) {
 	fmt.Fprintf(c.Out, format+"\n", args...)
 }
 
+// IsOpenShift reports whether the cluster is OpenShift or OKD, from the API
+// group of its pod security policies.
+func (c *Client) IsOpenShift() (bool, error) {
+	groups, err := c.K8s.Discovery().ServerGroups()
+	if err != nil {
+		return false, fmt.Errorf("list the API groups of the cluster: %w", err)
+	}
+	for _, g := range groups.Groups {
+		if g.Name == "security.openshift.io" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // EnsureNamespace creates the namespace if it does not exist, labeled as
 // created by tm-trace. An existing namespace is left as it is.
 func (c *Client) EnsureNamespace(ctx context.Context, ns string) error {

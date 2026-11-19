@@ -6,7 +6,7 @@ The analysis needs no GPU, no LMCache installation, and no credentials. `tm-trac
 
 ## Requirements
 
-- A Kubernetes cluster, with permission to create a namespace and to update PersistentVolumes, or a host with Docker or Podman.
+- A Kubernetes or OpenShift cluster, or a host with Docker or Podman. On a cluster, permission to create a namespace and to update PersistentVolumes, or see [OpenShift and limited permissions](#openshift-and-limited-permissions).
 - Nodes or hosts that can pull the analyzer and OpenTelemetry Collector images from `ghcr.io`. Without internet access, copy both images to a local registry, and use `--image` and `--collector-image` (or change `image` in the manifests).
 - On Kubernetes, a default StorageClass for a 50 GiB `ReadWriteOnce` volume. `--max-size` and `--storage-class` change it.
 - A trace source:
@@ -158,6 +158,13 @@ Without Kubernetes, the collector and the analyzer run as containers on one host
    rm -rf traces
    ```
 
+## OpenShift and limited permissions
+
+- On OpenShift, `tm-trace` leaves the user and group ids to OpenShift, which assigns them per project. For the manual steps, delete `runAsUser`, `runAsGroup` and `fsGroup` from the manifests.
+- Without permission to create namespaces, pass an existing namespace or project with `-n` to each command.
+- Without permission to update PersistentVolumes, `stop` deletes the volume claim, and the storage class decides whether the trace files are deleted with it.
+- With a ResourceQuota (`kubectl describe quota`), fit the volume with `start --max-size`, and the analyzer with `analyze --cpus` and `--memory`.
+
 ## Existing OpenTelemetry Collector
 
 The trace collector runs next to an existing collector and receives only request traces.
@@ -209,7 +216,7 @@ The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and tak
 - Both pods run as a non-root user with a read-only root filesystem, have no Kubernetes API token, and meet the Pod Security `restricted` profile.
 - With Docker, the collector's ports are open on all host interfaces. To accept traces only from the same host, publish them on `127.0.0.1`, for example `-p 127.0.0.1:4317:4317`.
 - The report holds aggregate numbers and model names only.
-- `tm-trace` applies these same manifests. It changes nothing outside its namespace, except the trace volume's reclaim policy at `stop`, and never changes a Tensormesh Platform release.
+- `tm-trace` applies these same manifests, without the fixed user and group ids on OpenShift. It changes nothing outside its namespace, except the trace volume's reclaim policy at `stop`, and never changes a Tensormesh Platform release.
 - Releases include `checksums.txt`, signed with cosign by the release workflow. The installer checks the checksum, and the signature when cosign is installed.
 
 ## Troubleshooting

@@ -1,8 +1,8 @@
 #!/bin/sh
 # End-to-end test of tm-trace on a cluster: start, status, analyze (every
 # format, one format and model, a custom format, a failure), the Tensormesh
-# Platform path with a stand-in platform collector, and stop (also in a
-# namespace that existed before start).
+# Platform path with a stand-in platform collector, stop (also in a namespace
+# that existed before start), and a user with rights in one namespace only.
 # Usage: test/tool-test.sh IMAGE TM_TRACE   (IMAGE must be available to the nodes)
 set -eu
 
@@ -13,12 +13,13 @@ work=$(mktemp -d)
 ns=tm-trace-test
 pns=tm-trace-platform
 own=tm-trace-existing
+prj=tm-trace-project
 
 finish() {
     status=$?
     if [ "$status" -ne 0 ]; then
         echo "tool test failed (exit $status). Cluster state:"
-        for n in "$ns" "$pns" "$own"; do
+        for n in "$ns" "$pns" "$own" "$prj"; do
             kubectl -n "$n" get all,pvc -o wide || true
             kubectl -n "$n" get events --sort-by=.lastTimestamp || true
         done
@@ -127,3 +128,40 @@ if [ -n "$left" ] || kubectl get pv "$pv" > /dev/null 2>&1; then
 fi
 kubectl delete namespace "$own" --timeout=5m
 echo "ok stop in an existing namespace"
+
+# 9. A user with rights in one namespace only, as on OpenShift, on a cluster
+# with OpenShift's API group: no fixed user and group ids, and stop without
+# permission to change volumes
+kubectl apply -f "$root/test/openshift-standin.yaml"
+kubectl wait --for=condition=established crd/securitycontextconstraints.security.openshift.io --timeout=60s
+kubectl create namespace "$prj"
+kubectl -n "$prj" create serviceaccount tm-user
+kubectl -n "$prj" create rolebinding tm-user --clusterrole=admin --serviceaccount="$prj:tm-user"
+user=$work/user.kubeconfig
+kubectl config view --minify --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > "$work/ca.crt"
+KUBECONFIG=$user kubectl config set-cluster c --server="$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')" \
+    --certificate-authority="$work/ca.crt" --embed-certs > /dev/null
+KUBECONFIG=$user kubectl config set-credentials u --token="$(kubectl -n "$prj" create token tm-user --duration 1h)" > /dev/null
+KUBECONFIG=$user kubectl config set-context c --cluster=c --user=u > /dev/null
+KUBECONFIG=$user kubectl config use-context c > /dev/null
+as_user() { KUBECONFIG=$user "$tool" "$@"; }
+as_user start -n "$prj" --max-size 5Gi
+ids=$(kubectl -n "$prj" get deploy trace-collector -o jsonpath='{.spec.template.spec.securityContext.runAsUser}{.spec.template.spec.securityContext.runAsGroup}{.spec.template.spec.securityContext.fsGroup}')
+if [ -n "$ids" ] || as_user analyze -n "$prj" --format lmcache --dry-run | grep -q -e runAsUser -e runAsGroup -e fsGroup; then
+    echo "FAIL: fixed user or group ids on OpenShift"; exit 1
+fi
+kubectl -n "$prj" create configmap trace-loader --from-file="$root/test/loader.py"
+load "$prj" lmcache http://trace-collector:4318
+sleep 10
+rm -f report-*.html
+as_user analyze -n "$prj" --format lmcache --image "$image" --pull missing
+python3 "$root/test/check_report.py" report-lmcache.html "$root/test/expected-lmcache.json"
+pv=$(kubectl -n "$prj" get pvc trace-collector-data -o jsonpath='{.spec.volumeName}')
+as_user stop -n "$prj" --yes > prj-stop.txt
+cat prj-stop.txt
+grep -q "No permission to change volume $pv\." prj-stop.txt
+grep -q "Deleted the trace collector and its volume claim. Namespace $prj stays." prj-stop.txt
+kubectl wait --for=delete "pv/$pv" --timeout=2m
+kubectl delete namespace "$prj" --timeout=5m
+kubectl delete -f "$root/test/openshift-standin.yaml"
+echo "ok one-namespace user on OpenShift stand-in"

@@ -84,6 +84,9 @@ type CollectorOptions struct {
 	PullPolicy   corev1.PullPolicy
 	// Deadline, if set, is when the collector stops writing trace files.
 	Deadline time.Time
+	// OpenShift leaves the user and group ids to OpenShift, which assigns
+	// each project its own.
+	OpenShift bool
 }
 
 // RenderCollector returns the trace collector objects for opts.
@@ -131,6 +134,9 @@ func RenderCollector(opts CollectorOptions) (*Collector, error) {
 	if opts.PullPolicy != "" {
 		pod.Containers[0].ImagePullPolicy = opts.PullPolicy
 	}
+	if opts.OpenShift {
+		withoutFixedIDs(pod)
+	}
 	for _, o := range c.Objects() {
 		setNamespace(o, opts.Namespace)
 	}
@@ -149,6 +155,8 @@ type AnalyzerOptions struct {
 	// platform collector's volume and runs next to the platform collector.
 	Volume   string
 	Platform bool
+	// OpenShift: see CollectorOptions.
+	OpenShift bool
 }
 
 // RenderAnalyzer returns the analyzer Job for format.
@@ -189,8 +197,20 @@ func RenderAnalyzer(format string, opts AnalyzerOptions) (*batchv1.Job, error) {
 		term := &pod.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]
 		term.LabelSelector.MatchLabels = map[string]string{PlatformCollectorLabel: PlatformCollectorValue}
 	}
+	if opts.OpenShift {
+		withoutFixedIDs(pod)
+	}
 	setNamespace(job, opts.Namespace)
 	return job, nil
+}
+
+// withoutFixedIDs removes the fixed user and group ids from pod. OpenShift's
+// default policy rejects ids outside the project's range and assigns them
+// itself; the images run with any user id.
+func withoutFixedIDs(pod *corev1.PodSpec) {
+	if sc := pod.SecurityContext; sc != nil {
+		sc.RunAsUser, sc.RunAsGroup, sc.FSGroup = nil, nil, nil
+	}
 }
 
 // DockerConfig returns the collector configuration for Docker, sized for size.

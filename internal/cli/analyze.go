@@ -142,6 +142,10 @@ func analyzeKube(ctx context.Context, o *options, a *analyzeOptions, formats []s
 			return fmt.Errorf("the platform's OpenTelemetry Collector is not running in namespace %s", t.Namespace)
 		}
 	}
+	openshift, err := c.IsOpenShift()
+	if err != nil {
+		return err
+	}
 	if a.customFormat != "" && !o.dryRun {
 		script, err := os.ReadFile(a.customFormat)
 		if err != nil {
@@ -158,6 +162,7 @@ func analyzeKube(ctx context.Context, o *options, a *analyzeOptions, formats []s
 		job, err := manifest.RenderAnalyzer(format, manifest.AnalyzerOptions{
 			Namespace: t.Namespace, Image: a.image, PullPolicy: pull, AnalyzerArgs: a.args(),
 			Memory: memory, CPU: cpus, Volume: t.Volume, Platform: t.Kind == kube.Platform,
+			OpenShift: openshift,
 		})
 		if err != nil {
 			return err
