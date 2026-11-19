@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	kit "github.com/tensormesh-production/kv-cache-trace-analysis"
 	"github.com/tensormesh-production/kv-cache-trace-analysis/internal/container"
 	"github.com/tensormesh-production/kv-cache-trace-analysis/internal/kube"
 	"github.com/tensormesh-production/kv-cache-trace-analysis/internal/manifest"
@@ -25,7 +27,16 @@ type analyzeOptions struct {
 	timeout                                   time.Duration
 }
 
-var formatNames = map[string]string{"lmcache": "LMCache", "dynamo": "Dynamo", "custom": "custom"}
+var formatNames = map[string]string{"lmcache": "LMCache", "dynamo": "Dynamo", "kserve": "KServe", "custom": "custom"}
+
+// jobFormat is the analyzer format that reads format: the KServe reader runs
+// as a custom format, from the trace-format ConfigMap.
+func jobFormat(format string) string {
+	if format == "kserve" {
+		return "custom"
+	}
+	return format
+}
 
 func newAnalyze(o *options) *cobra.Command {
 	a := &analyzeOptions{}
@@ -34,8 +45,9 @@ func newAnalyze(o *options) *cobra.Command {
 		Short: "Run the analysis and save report-<format>.html",
 		Long: `Runs the LMCache trace analyzer next to the trace files, and saves one HTML
 report per trace format in the output folder. By default, it analyzes every
-format that has records: LMCache and Dynamo (LMCache only with the Tensormesh
-Platform). The analyzer runs with no network access and is deleted afterwards.`,
+format that has records: LMCache and Dynamo, and KServe when tm-trace start
+added its input (LMCache only with the Tensormesh Platform). The analyzer runs
+with no network access and is deleted afterwards.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			formats, explicit, err := a.formats()
@@ -49,7 +61,7 @@ Platform). The analyzer runs with no network access and is deleted afterwards.`,
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&a.format, "format", "", "trace format: lmcache, dynamo or custom (default: every format with records)")
+	f.StringVar(&a.format, "format", "", "trace format: lmcache, dynamo, kserve or custom (default: every format with records)")
 	f.StringVar(&a.customFormat, "custom-format", "", "custom_format.py for traces from other routers (sets --format custom)")
 	f.StringVar(&a.model, "model", "", "analyze one model only")
 	f.StringVar(&a.analyzerArgs, "analyzer-args", "", "more options for lmcache bench trace-analyze, such as \"--chunk-size 256\"")
@@ -77,7 +89,7 @@ func (a *analyzeOptions) formats() ([]string, bool, error) {
 		return nil, false, errors.New("--format custom needs --custom-format custom_format.py")
 	case a.format != "":
 		if _, ok := formatNames[a.format]; !ok {
-			return nil, false, fmt.Errorf("--format must be lmcache, dynamo or custom, not %q", a.format)
+			return nil, false, fmt.Errorf("--format must be lmcache, dynamo, kserve or custom, not %q", a.format)
 		}
 		return []string{a.format}, true, nil
 	}
@@ -141,15 +153,25 @@ func analyzeKube(ctx context.Context, o *options, a *analyzeOptions, formats []s
 		if !running {
 			return fmt.Errorf("the platform's OpenTelemetry Collector is not running in namespace %s", t.Namespace)
 		}
+	} else if !explicit {
+		kserve, err := c.CollectorHasKServe(ctx, t.Namespace)
+		if err != nil {
+			return err
+		}
+		if kserve {
+			formats = append(formats, "kserve")
+		}
 	}
 	openshift, err := c.IsOpenShift()
 	if err != nil {
 		return err
 	}
-	if a.customFormat != "" && !o.dryRun {
-		script, err := os.ReadFile(a.customFormat)
-		if err != nil {
-			return err
+	if (a.customFormat != "" || slices.Contains(formats, "kserve")) && !o.dryRun {
+		script := kit.KServeFormat
+		if a.customFormat != "" {
+			if script, err = os.ReadFile(a.customFormat); err != nil {
+				return err
+			}
 		}
 		cm := &corev1.ConfigMap{Data: map[string]string{"custom_format.py": string(script)}}
 		cm.Name, cm.Namespace = kube.FormatConfigMap, t.Namespace
@@ -159,7 +181,7 @@ func analyzeKube(ctx context.Context, o *options, a *analyzeOptions, formats []s
 	}
 	var reports []string
 	for _, format := range formats {
-		job, err := manifest.RenderAnalyzer(format, manifest.AnalyzerOptions{
+		job, err := manifest.RenderAnalyzer(jobFormat(format), manifest.AnalyzerOptions{
 			Namespace: t.Namespace, Image: a.image, PullPolicy: pull, AnalyzerArgs: a.args(),
 			Memory: memory, CPU: cpus, Volume: t.Volume, Platform: t.Kind == kube.Platform,
 			OpenShift: openshift,
@@ -248,7 +270,7 @@ func handleResult(o *options, a *analyzeOptions, format string, log []byte, err 
 		return path, nil
 	case errors.Is(err, kube.ErrOutOfMemory):
 		return "", fmt.Errorf("the analyzer ran out of memory with --memory %s: raise --memory, or analyze one model with --model", a.memory)
-	case errors.As(err, &jobErr) && noRecords(jobErr.Log, format):
+	case errors.As(err, &jobErr) && noRecords(jobErr.Log, jobFormat(format)):
 		if a.model != "" {
 			return "", fmt.Errorf("no %s trace records for model %s: check --model", formatNames[format], a.model)
 		}

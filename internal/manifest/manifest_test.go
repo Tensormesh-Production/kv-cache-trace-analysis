@@ -239,3 +239,48 @@ func TestDeadline(t *testing.T) {
 		t.Error("Deadline() found a deadline in the default configuration")
 	}
 }
+
+// With KServe, the collector gets the input for KServe's payload logger, with a
+// port, and keeps working as before for the other sources.
+func TestRenderCollectorKServe(t *testing.T) {
+	plain, err := RenderCollector(CollectorOptions{Namespace: "ns", Size: resource.MustParse(DefaultSize)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HasKServe(plain.ConfigMap.Data["config.yaml"]) {
+		t.Error("KServe input without the option")
+	}
+	for _, deadline := range []time.Time{{}, time.Unix(1893456000, 0)} {
+		c, err := RenderCollector(CollectorOptions{Namespace: "ns", Size: resource.MustParse(DefaultSize), KServe: true, Deadline: deadline})
+		if err != nil {
+			t.Fatal(err)
+		}
+		config := c.ConfigMap.Data["config.yaml"]
+		for _, want := range []string{
+			"receivers:\n  webhook_event/kserve:\n    endpoint: 0.0.0.0:8088\n    path: /events\n    max_request_body_size: 67108864\n    header_attribute_regex: \"^Ce-\"\n  otlp:\n",
+			"    logs:\n      receivers: [otlp, webhook_event/kserve]\n",
+			`attributes["event_type"] != "request_payload"'` + "\n" + `        - 'instrumentation_scope.name == "otlp/webhook_event" and attributes["header.Ce-Type"][0] != "org.kubeflow.serving.inference.request"'` + "\n",
+		} {
+			if !strings.Contains(config, want) {
+				t.Errorf("deadline %v: config misses %q:\n%s", deadline, want, config)
+			}
+		}
+		if strings.Count(config, "receivers: [otlp]\n") != 2 || !HasKServe(config) {
+			t.Errorf("traces and metrics pipelines changed:\n%s", config)
+		}
+		if !deadline.IsZero() && !strings.Contains(config, "filter/deadline") {
+			t.Error("deadline lost")
+		}
+		ports := c.Deployment.Spec.Template.Spec.Containers[0].Ports
+		svc := c.Service.Spec.Ports
+		if p := ports[len(ports)-1]; p.Name != "kserve" || p.ContainerPort != 8088 {
+			t.Errorf("container port %+v", p)
+		}
+		if p := svc[len(svc)-1]; p.Name != "kserve" || p.Port != 8088 || p.TargetPort.StrVal != "kserve" {
+			t.Errorf("service port %+v", p)
+		}
+		if len(ports) != len(plain.Deployment.Spec.Template.Spec.Containers[0].Ports)+1 || len(svc) != len(plain.Service.Spec.Ports)+1 {
+			t.Error("other ports changed")
+		}
+	}
+}

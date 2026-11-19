@@ -2,7 +2,8 @@
 # End-to-end test of tm-trace on a cluster: start, status, analyze (every
 # format, one format and model, a custom format, a failure), the Tensormesh
 # Platform path with a stand-in platform collector, stop (also in a namespace
-# that existed before start), and a user with rights in one namespace only.
+# that existed before start), a user with rights in one namespace only, and the
+# KServe input with simulated KServe events.
 # Usage: test/tool-test.sh IMAGE TM_TRACE   (IMAGE must be available to the nodes)
 set -eu
 
@@ -14,12 +15,13 @@ ns=tm-trace-test
 pns=tm-trace-platform
 own=tm-trace-existing
 prj=tm-trace-project
+ksn=tm-trace-kserve
 
 finish() {
     status=$?
     if [ "$status" -ne 0 ]; then
         echo "tool test failed (exit $status). Cluster state:"
-        for n in "$ns" "$pns" "$own" "$prj"; do
+        for n in "$ns" "$pns" "$own" "$prj" "$ksn"; do
             kubectl -n "$n" get all,pvc -o wide || true
             kubectl -n "$n" get events --sort-by=.lastTimestamp || true
         done
@@ -165,3 +167,22 @@ kubectl wait --for=delete "pv/$pv" --timeout=2m
 kubectl delete namespace "$prj" --timeout=5m
 kubectl delete -f "$root/test/openshift-standin.yaml"
 echo "ok one-namespace user on OpenShift stand-in"
+
+# 10. KServe: the collector's input for KServe's payload logger. The loader posts
+# CloudEvents as KServe's agent does: 300 requests, 30 response events and 3
+# other posts. The collector keeps only the 300 requests, and the analysis of the
+# same requests as the Dynamo test gives the same report.
+"$tool" start -n "$ksn" --max-size 5Gi --kserve > kserve-start.txt
+cat kserve-start.txt
+grep -q "^      url: http://trace-collector.$ksn.svc:8088/events$" kserve-start.txt
+kubectl -n "$ksn" create configmap trace-loader --from-file="$root/test/loader.py"
+load "$ksn" kserve http://trace-collector:8088/events
+sleep 10
+"$tool" status -n "$ksn" | tee kserve-status.txt
+grep -q " 300 log records (NVIDIA Dynamo and KServe)" kserve-status.txt
+rm -f report-*.html
+analyze -n "$ksn"
+python3 "$root/test/check_report.py" report-kserve.html "$root/test/expected-dynamo.json"
+if [ -e report-lmcache.html ] || [ -e report-dynamo.html ]; then echo "FAIL: reports without records"; exit 1; fi
+"$tool" stop -n "$ksn" --yes
+echo "ok kserve"

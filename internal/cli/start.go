@@ -22,7 +22,7 @@ type startOptions struct {
 	maxSize, storageClass, image, listen, duration string
 	nodeSelector                                   map[string]string
 	deadline                                       time.Time
-	openshift                                      bool
+	openshift, kserve                              bool
 }
 
 // traceValuesFile and traceOnValues turn on the platform's request traces,
@@ -67,6 +67,9 @@ on its request traces instead: the platform release is never changed by tm-trace
 				s.deadline = time.Now().Add(d).Truncate(time.Second)
 			}
 			if o.useDocker() {
+				if s.kserve {
+					return errors.New("--kserve needs Kubernetes, where KServe runs")
+				}
 				return startDocker(cmd.Context(), o, s, size)
 			}
 			return startKube(cmd.Context(), o, s, size)
@@ -79,6 +82,7 @@ on its request traces instead: the platform release is never changed by tm-trace
 	f.StringVar(&s.image, "collector-image", "", "collector image, for a mirror (default: the OpenTelemetry Collector Contrib image)")
 	f.StringVar(&s.listen, "listen", "0.0.0.0", "host address for the collector ports, with --docker: 127.0.0.1 accepts traces from this host only")
 	f.StringVar(&s.duration, "duration", "", "stop collecting after this time, such as 12h or 2d; the trace files stay for the analysis (default: until tm-trace stop)")
+	f.BoolVar(&s.kserve, "kserve", false, "add an input for KServe's payload logger, and print the InferenceService logger setting")
 	return cmd
 }
 
@@ -134,6 +138,9 @@ func startKube(ctx context.Context, o *options, s *startOptions, size resource.Q
 	sayDeadline(o, s.deadline)
 	o.say("")
 	printSourceSettings(o, fmt.Sprintf("http://%s.%s.svc:4317", kube.Collector, ns))
+	if s.kserve {
+		printKServeSettings(o, fmt.Sprintf("http://%s.%s.svc:%d%s", kube.Collector, ns, manifest.KServePort, manifest.KServePath))
+	}
 	o.say("\nAfter the collection period, run: tm-trace analyze%s", nsFlag(ns))
 	return nil
 }
@@ -147,6 +154,7 @@ func collectorOptions(s *startOptions, size resource.Quantity, ns string) manife
 		Image:        s.image,
 		Deadline:     s.deadline,
 		OpenShift:    s.openshift,
+		KServe:       s.kserve,
 	}
 }
 
@@ -162,6 +170,9 @@ func dryRunCollector(o *options, s *startOptions, size resource.Quantity, ns str
 
 func startPlatform(ctx context.Context, o *options, s *startOptions, c *kube.Client, r *kube.Release) error {
 	o.say("Found the Tensormesh Platform: release %s, chart %s, namespace %s.", r.Name, r.Version, r.Namespace)
+	if s.kserve {
+		return errors.New("--kserve needs the trace collector of tm-trace: pass -n with a namespace for it")
+	}
 	if !s.deadline.IsZero() {
 		return errors.New("--duration needs the trace collector of tm-trace; with the Tensormesh Platform, run tm-trace stop at the end of the collection window")
 	}
@@ -252,6 +263,16 @@ func parseDuration(v string) (time.Duration, error) {
 		return 0, fmt.Errorf("%q is not a positive duration, such as 90m, 12h or 2d", v)
 	}
 	return d, nil
+}
+
+func printKServeSettings(o *options, url string) {
+	o.say(`
+  KServe: add this logger to the predictor of each InferenceService, under
+  spec.predictor:
+
+    logger:
+      mode: request
+      url: %s`, url)
 }
 
 func printSourceSettings(o *options, endpoint string) {

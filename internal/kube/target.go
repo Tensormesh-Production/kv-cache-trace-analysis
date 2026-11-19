@@ -83,6 +83,19 @@ func (c *Client) RequestTraceVolume(ctx context.Context, ns string) (string, err
 	return "", nil
 }
 
+// CollectorHasKServe reports whether the trace collector in ns has the input
+// for KServe's payload logger.
+func (c *Client) CollectorHasKServe(ctx context.Context, ns string) (bool, error) {
+	cm, err := c.K8s.CoreV1().ConfigMaps(ns).Get(ctx, Collector, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return manifest.HasKServe(cm.Data["config.yaml"]), nil
+}
+
 // PlatformCollectorRunning reports whether the platform collector pod runs in ns.
 func (c *Client) PlatformCollectorRunning(ctx context.Context, ns string) (bool, error) {
 	pods, err := c.K8s.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{

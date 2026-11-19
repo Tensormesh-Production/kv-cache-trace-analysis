@@ -41,6 +41,7 @@ release:
     - glob: deploy/analyzer/analyzer-*.yaml
     - glob: deploy/docker/collector-config.yaml
     - glob: tools/custom_format.py
+    - glob: tools/kserve_format.py
     - glob: install.sh
 
 changelog:

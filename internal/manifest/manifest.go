@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 
 	kit "github.com/tensormesh-production/kv-cache-trace-analysis"
@@ -36,6 +37,13 @@ const (
 	PlatformCollectorLabel = "app.kubernetes.io/component"
 	// PlatformCollectorValue is the value of PlatformCollectorLabel.
 	PlatformCollectorValue = "opentelemetry-collector"
+
+	// KServePort and KServePath are where the collector's KServe input
+	// receives the requests of KServe's payload logger.
+	KServePort = 8088
+	KServePath = "/events"
+	// KServeReceiver is the collector's KServe input.
+	KServeReceiver = "webhook_event/kserve"
 )
 
 // Formats are the trace formats with an analyzer manifest.
@@ -87,6 +95,8 @@ type CollectorOptions struct {
 	// OpenShift leaves the user and group ids to OpenShift, which assigns
 	// each project its own.
 	OpenShift bool
+	// KServe adds the input for KServe's payload logger.
+	KServe bool
 }
 
 // RenderCollector returns the trace collector objects for opts.
@@ -118,6 +128,11 @@ func RenderCollector(opts CollectorOptions) (*Collector, error) {
 	if config, err = WithDeadline(config, opts.Deadline); err != nil {
 		return nil, err
 	}
+	if opts.KServe {
+		if config, err = withKServe(config); err != nil {
+			return nil, err
+		}
+	}
 	c.ConfigMap.Data["config.yaml"] = config
 	c.Volume.Spec.Resources.Requests[corev1.ResourceStorage] = opts.Size
 	if opts.StorageClass != "" {
@@ -136,6 +151,13 @@ func RenderCollector(opts CollectorOptions) (*Collector, error) {
 	}
 	if opts.OpenShift {
 		withoutFixedIDs(pod)
+	}
+	if opts.KServe {
+		pod.Containers[0].Ports = append(pod.Containers[0].Ports,
+			corev1.ContainerPort{Name: "kserve", ContainerPort: KServePort})
+		c.Service.Spec.Ports = append(c.Service.Spec.Ports, corev1.ServicePort{
+			Name: "kserve", Port: KServePort, TargetPort: intstr.FromString("kserve"),
+		})
 	}
 	for _, o := range c.Objects() {
 		setNamespace(o, opts.Namespace)
@@ -273,6 +295,37 @@ func WithDeadline(config string, deadline time.Time) (string, error) {
 	config = config[:m[1]] + indent + filter + config[m[1]:]
 	return strings.ReplaceAll(config, requestPipeline,
 		"processors: [memory_limiter, filter/deadline, filter/request-trace, batch/request-trace]"), nil
+}
+
+// withKServe adds the input for KServe's payload logger: a webhook receiver
+// that turns each request, a CloudEvent, into a log record and keeps the ce-*
+// headers. The filter drops the response events of logger mode all, and
+// anything else that is not a KServe request.
+func withKServe(config string) (string, error) {
+	recv := regexp.MustCompile(`(?m)^( *)receivers:\n`).FindStringSubmatchIndex(config)
+	logs := regexp.MustCompile(`(?m)^( *)logs:\n( *)receivers: \[otlp\]\n`).FindAllStringSubmatchIndex(config, -1)
+	drop := regexp.MustCompile(`(?m)^( *)- 'instrumentation_scope.name == "dynamo.request_trace".*\n`).FindAllStringSubmatchIndex(config, -1)
+	if recv == nil || len(logs) != 1 || len(drop) != 1 {
+		return "", fmt.Errorf("collector configuration: receivers, logs pipeline or log filter not found")
+	}
+	indent := config[recv[2]:recv[3]]
+	receiver := strings.Join([]string{
+		"  " + KServeReceiver + ":",
+		fmt.Sprintf("    endpoint: 0.0.0.0:%d", KServePort),
+		"    path: " + KServePath,
+		"    max_request_body_size: 67108864",
+		`    header_attribute_regex: "^Ce-"`,
+	}, "\n"+indent) + "\n"
+	filter := config[drop[0][2]:drop[0][3]] + `- 'instrumentation_scope.name == "otlp/webhook_event" and attributes["header.Ce-Type"][0] != "org.kubeflow.serving.inference.request"'` + "\n"
+	// Edit from the end, so that the earlier offsets stay valid.
+	config = config[:logs[0][1]-len("[otlp]\n")] + "[otlp, " + KServeReceiver + "]\n" + config[logs[0][1]:]
+	config = config[:drop[0][1]] + filter + config[drop[0][1]:]
+	return config[:recv[1]] + indent + receiver + config[recv[1]:], nil
+}
+
+// HasKServe reports whether a collector configuration has the KServe input.
+func HasKServe(config string) bool {
+	return strings.Contains(config, KServeReceiver+":")
 }
 
 var deadlinePattern = regexp.MustCompile(`UnixSeconds\(Now\(\)\) > (\d+)`)

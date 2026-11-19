@@ -8,9 +8,10 @@ image=$1
 root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/both" "$work/dynamo-only" "$work/out"
+mkdir -p "$work/both" "$work/dynamo-only" "$work/kserve" "$work/out"
 python3 "$root/test/loader.py" --format both --file "$work/both/trace.jsonl"
 python3 "$root/test/loader.py" --format dynamo --file "$work/dynamo-only/trace.jsonl"
+python3 "$root/test/loader.py" --format kserve --file "$work/kserve/trace.jsonl"
 chmod -R a+rX "$work"
 
 # analyze DATA_DIR FORMAT [docker run options]: prints the analyzer output
@@ -29,6 +30,14 @@ done
 python3 "$root/test/check_report.py" "$work/out/dynamo.html" "$root/test/expected-dynamo.json"
 python3 "$root/test/check_report.py" "$work/out/lmcache.html" "$root/test/expected-lmcache.json"
 python3 "$root/test/check_report.py" "$work/out/custom.html" "$root/test/expected-dynamo.json"
+
+# The KServe reader (tools/kserve_format.py) runs as a custom format. The same
+# requests as the Dynamo test give the same report; response events and other
+# posts are skipped.
+docker run --rm --network none --read-only --tmpfs /tmp --user 10001:10001 \
+    -v "$work/kserve:/data:ro" -v "$root/tools/kserve_format.py:/formats/custom_format.py:ro" \
+    -e TRACE_FORMAT=custom "$image" > "$work/out/kserve.html"
+python3 "$root/test/check_report.py" "$work/out/kserve.html" "$root/test/expected-dynamo.json"
 
 analyze "$work/both" dynamo -e ANALYZER_ARGS="--model model-b" > "$work/out/model-b.html"
 if ! grep -q 'model-b' "$work/out/model-b.html" || grep -q 'model-a' "$work/out/model-b.html"; then

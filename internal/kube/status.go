@@ -28,6 +28,8 @@ type Status struct {
 	Started          time.Time
 	VolumeSize       string
 	Deadline         time.Time
+	// KServe is set when the collector has the input for KServe's payload logger.
+	KServe bool
 	// Counts are the collector's own counters since it started, from its
 	// metrics, or nil if they could not be read.
 	Counts *Counts
@@ -62,6 +64,7 @@ func (c *Client) CollectorStatus(ctx context.Context, t *Target) (*Status, error
 	if t.Kind == Kit {
 		if cm, err := c.K8s.CoreV1().ConfigMaps(t.Namespace).Get(ctx, Collector, metav1.GetOptions{}); err == nil {
 			s.Deadline, _ = manifest.Deadline(cm.Data["config.yaml"])
+			s.KServe = manifest.HasKServe(cm.Data["config.yaml"])
 		}
 	}
 	pods, err := c.K8s.CoreV1().Pods(t.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})

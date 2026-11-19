@@ -50,8 +50,12 @@ func statusKube(ctx context.Context, o *options) error {
 		o.say("%s in namespace %s: pod %s on node %s, %s%s.", name, t.Namespace, s.Pod, s.Node, s.Phase, since(s.Started))
 	}
 	if s.Counts != nil {
-		o.say("Request records written since the collector started: %s spans (LMCache) and %s log records (NVIDIA Dynamo).",
-			count(s.Counts.Spans), count(s.Counts.LogRecords))
+		logs := "NVIDIA Dynamo"
+		if s.KServe {
+			logs = "NVIDIA Dynamo and KServe"
+		}
+		o.say("Request records written since the collector started: %s spans (LMCache) and %s log records (%s).",
+			count(s.Counts.Spans), count(s.Counts.LogRecords), logs)
 		if s.Counts.AfterDeadline > 0 {
 			o.say("Records dropped after the --duration deadline: %s.", count(s.Counts.AfterDeadline))
 		}
