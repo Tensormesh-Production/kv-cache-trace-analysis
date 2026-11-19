@@ -11,9 +11,10 @@ The analysis needs no GPU, no LMCache installation, and no credentials. `tm-trac
 - On Kubernetes, a default StorageClass for a 50 GiB `ReadWriteOnce` volume. `--max-size` and `--storage-class` change it.
 - A trace source:
   - NVIDIA Dynamo 1.4 or later, or
+  - KServe 0.20 or later, with the payload logger of an InferenceService (see [KServe](#kserve)), or
   - LMCache 0.5.7 or later in multiprocess (MP) mode, or
   - another router that exports OpenTelemetry (OTLP) records, with a [custom trace format](#custom-trace-formats).
-- Network access from the trace source to the collector on port 4317.
+- Network access from the trace source to the collector on port 4317, or 8088 for KServe.
 
 ## Quickstart
 
@@ -54,6 +55,7 @@ It uses the current kubectl context. `--context` and `--kubeconfig` pick another
 - Without Kubernetes, add `--docker` to each command. It uses Docker or Podman on this host, and keeps the trace files in `tm-trace/traces`.
 - The trace files stay under `--max-size` (default 50 GiB). On Kubernetes, it is the volume size. With `--docker`, `start` checks that the disk has that much free space.
 - `start --duration 24h` stops collecting after that time, for example to keep to an approved collection window. The trace files stay until `stop`.
+- `start --kserve` adds an input for KServe's payload logger. See [KServe](#kserve).
 - `tm-trace <command> --help` lists the options, such as `--model`, `--custom-format`, `--image` for mirrors, and `--dry-run` to see what would run.
 
 ## Manual steps with kubectl
@@ -158,6 +160,40 @@ Without Kubernetes, the collector and the analyzer run as containers on one host
    rm -rf traces
    ```
 
+## KServe
+
+KServe's payload logger sends each request of an InferenceService to the collector's KServe input.
+
+1. Deploy the collector with the KServe input. It prints the `logger` setting:
+
+   ```bash
+   tm-trace start --kserve
+   ```
+
+2. Add the `logger` to the predictor of each InferenceService. KServe then restarts the predictor pods with its agent, which sends the requests:
+
+   ```yaml
+   spec:
+     predictor:
+       logger:
+         mode: request
+         url: http://trace-collector.trace-analysis.svc:8088/events
+   ```
+
+3. After the collection period, `tm-trace analyze` also saves `report-kserve.html`. Then remove the `logger`.
+
+- `mode: request` sends requests only. The collector drops KServe's response events and any other posts.
+- The analysis reads OpenAI chat and completions requests, such as `/openai/v1/chat/completions`.
+- The logger is best effort: requests that it cannot send, for example while the collector restarts, are not recorded.
+- When the predictor uses LMCache in MP mode, LMCache's request traces count exact tokens and need no `logger`: add the LMCache flags of [step 2](#2-send-traces) to its LMCache server. LMCache in-process mode (`LMCacheConnectorV1`) has no request traces.
+- LLMInferenceService has no payload logger. With LMCache in MP mode, use its request traces instead.
+- Manual steps: `tm-trace start --kserve --dry-run -n trace-analysis` prints the collector manifest with the KServe input. For the analysis, load [`kserve_format.py`](tools/kserve_format.py) from the release as the custom format, then run the analysis with `FORMAT=custom` (see [Custom trace formats](#custom-trace-formats)):
+
+  ```bash
+  curl -fsSLO https://github.com/tensormesh-production/kv-cache-trace-analysis/releases/latest/download/kserve_format.py
+  kubectl -n trace-analysis create configmap trace-format --from-file=custom_format.py=kserve_format.py
+  ```
+
 ## OpenShift and limited permissions
 
 - On OpenShift, `tm-trace` leaves the user and group ids to OpenShift, which assigns them per project. For the manual steps, delete `runAsUser`, `runAsGroup` and `fsGroup` from the manifests.
@@ -179,6 +215,8 @@ The trace collector runs next to an existing collector and receives only request
 - Prefix hit rate: share of tokens in the leading run of cached chunks of each request.
 - Non-prefix hit rate: share of tokens that CacheBlend could reuse outside that prefix.
 - Request and token totals, and LRU evictions.
+
+Dynamo and KServe traces hold the request text, not token ids: the analyzer counts every 4 bytes of text as one token, about one token of English text, so their results are an estimate.
 
 A KV cache is not shared between models. If the report lists several models, run one analysis per model with `--model` (see [Analyzer options](#analyzer-options)).
 
@@ -207,11 +245,11 @@ kubectl -n trace-analysis create configmap trace-format --from-file=custom_forma
 
 ## Sizing
 
-The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and takes about 3 seconds per million tokens. The Job's 16 GiB memory limit covers about 400 million tokens: about 1.8 GB of Dynamo trace files, or 9 GB of LMCache trace files. For larger traces, raise the memory limit (`--memory` with `tm-trace` or Docker, `resources.limits.memory` in the Job manifest), or analyze one model at a time.
+The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and takes about 3 seconds per million tokens. The Job's 16 GiB memory limit covers about 400 million tokens: about 1.8 GB of Dynamo or KServe trace files, or 9 GB of LMCache trace files. For larger traces, raise the memory limit (`--memory` with `tm-trace` or Docker, `resources.limits.memory` in the Job manifest), or analyze one model at a time.
 
 ## Privacy and security
 
-- Trace files hold request content: request payloads for Dynamo, token IDs for LMCache. They stay on the collector's volume, or in `traces/` with Docker. No component sends data out of the cluster or the host.
+- Trace files hold request content: request payloads for Dynamo and KServe, token IDs for LMCache. They stay on the collector's volume, or in `traces/` with Docker. No component sends data out of the cluster or the host.
 - The analyzer mounts the volume read-only and makes no network connections.
 - Both pods run as a non-root user with a read-only root filesystem, have no Kubernetes API token, and meet the Pod Security `restricted` profile.
 - With Docker, the collector's ports are open on all host interfaces. To accept traces only from the same host, publish them on `127.0.0.1`, for example `-p 127.0.0.1:4317:4317`.
@@ -223,7 +261,7 @@ The analyzer needs about 0.4 GB of memory plus 38 MB per million tokens, and tak
 
 | Symptom | Fix |
 |---|---|
-| The report file shows `No '<format>' trace records` | Check `FORMAT`. Then check the source settings, and that no NetworkPolicy blocks port 4317 to the collector. |
+| The report file shows `No '<format>' trace records` | Check `FORMAT`. Then check the source settings, and that no NetworkPolicy blocks port 4317 (8088 for KServe) to the collector. |
 | The report file shows a JSON error | The newest trace file was still being written. Delete the Job and run it again. |
 | `wait` does not return and the analyzer pod is `Pending` | The analyzer runs on the collector's node, because the volume is `ReadWriteOnce`. Free 1 CPU and 1 GiB of memory on that node. |
 | The report file is empty | Run `kubectl -n trace-analysis get pods`. For `OOMKilled`, see [Sizing](#sizing). |

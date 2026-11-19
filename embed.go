@@ -25,6 +25,12 @@ var analyzerDynamo []byte
 //go:embed deploy/analyzer/analyzer-custom.yaml
 var analyzerCustom []byte
 
+// KServeFormat is the analyzer's reader for the requests that KServe's
+// payload logger sends to the collector's KServe input.
+//
+//go:embed tools/kserve_format.py
+var KServeFormat []byte
+
 // DockerCollectorConfig is the trace collector configuration for Docker.
 //
 //go:embed deploy/docker/collector-config.yaml

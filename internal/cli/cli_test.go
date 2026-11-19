@@ -24,6 +24,7 @@ func TestFormats(t *testing.T) {
 	}{
 		{analyzeOptions{}, "lmcache,dynamo", false, false},
 		{analyzeOptions{format: "dynamo"}, "dynamo", true, false},
+		{analyzeOptions{format: "kserve"}, "kserve", true, false},
 		{analyzeOptions{customFormat: custom}, "custom", true, false},
 		{analyzeOptions{customFormat: custom, format: "custom"}, "custom", true, false},
 		{analyzeOptions{customFormat: custom, format: "lmcache"}, "", false, true},
@@ -51,6 +52,10 @@ func TestArgsAndConversions(t *testing.T) {
 	}
 	if noRecords([]byte("No 'lmcache' trace records"), "dynamo") {
 		t.Error("noRecords: other format")
+	}
+	// The KServe reader runs as a custom format.
+	if !noRecords([]byte("ValueError: No 'custom' trace records in /data/a.jsonl"), jobFormat("kserve")) {
+		t.Error("noRecords: kserve")
 	}
 }
 
@@ -138,5 +143,14 @@ func TestPlatformValues(t *testing.T) {
 	}
 	if !strings.Contains(traceOnValues, "- --enable-token-trace") || !strings.Contains(traceOffValues, "extraArgs: []") {
 		t.Error("values do not set the LMCache flag")
+	}
+}
+
+// KServe runs on Kubernetes only: --kserve refuses Docker.
+func TestKServeNeedsKubernetes(t *testing.T) {
+	cmd := NewRoot(&bytes.Buffer{}, strings.NewReader(""))
+	cmd.SetArgs([]string{"start", "--docker", "--dry-run", "--kserve", "--dir", t.TempDir()})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "needs Kubernetes") {
+		t.Errorf("start --docker --kserve: err = %v", err)
 	}
 }
